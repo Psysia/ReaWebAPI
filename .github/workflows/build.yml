@@ -1,4 +1,4 @@
-name: Build ReaWebAPI
+name: Build PRS Windows compatibility runtime
 
 on:
   push:
@@ -22,10 +22,6 @@ jobs:
       matrix:
         include:
           - { platform: windows, arch: x64, runner: windows-2022 }
-          - { platform: macos, arch: arm64, runner: macos-15 }
-          - { platform: macos, arch: x86_64, runner: macos-15-intel }
-          - { platform: linux, arch: x86_64, runner: ubuntu-24.04 }
-          - { platform: linux, arch: aarch64, runner: ubuntu-24.04-arm }
     steps:
       - uses: actions/checkout@v6
         with:
@@ -76,6 +72,8 @@ jobs:
         run: codesign --force --sign - stage/UserPlugins/reaper_reawebapi-${{ matrix.arch }}.dylib
       - name: Package and checksums
         run: python tools/package.py --stage stage --platform ${{ matrix.platform }} --arch ${{ matrix.arch }} --revision ${{ github.sha }} --release-dir release
+      - name: Package corresponding source and provenance
+        run: python tools/prs_manifest.py
       - name: Upload installation bundle
         uses: actions/upload-artifact@v6
         with:
@@ -87,9 +85,9 @@ jobs:
   release:
     name: Publish GitHub Release
     needs: build
-    if: >-
-      github.event_name != 'pull_request' &&
-      (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/v'))
+    # PRS compatibility artifacts are reviewed and published under their own
+    # immutable prerelease tag. Never replace an upstream mirror release.
+    if: ${{ false }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:

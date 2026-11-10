@@ -62,8 +62,12 @@ public:
     std::vector<HWND> next;
     if (GetWindowLongPtrW(child, GWL_STYLE) & WS_CHILD) {
       for (auto parent = GetParent(child); parent; parent = GetParent(parent)) {
-        next.push_back(parent);
+        // Docker child containers need the WebView surface workaround, but
+        // the top-level DAW owns redraw batching for the entire project.
+        // Swallowing its WM_SETREDRAW disables REAPER's UI-refresh suspension
+        // whenever a visible WebView is docked (including PreventUIRefresh).
         if (!(GetWindowLongPtrW(parent, GWL_STYLE) & WS_CHILD)) break;
+        next.push_back(parent);
       }
     }
     if (next == parents_) return;

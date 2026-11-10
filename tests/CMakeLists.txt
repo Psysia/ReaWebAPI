@@ -1,3 +1,11 @@
+if(WIN32)
+  add_executable(windows_dock_redraw windows_dock_redraw.cpp)
+  target_include_directories(windows_dock_redraw PRIVATE "${PROJECT_SOURCE_DIR}/src")
+  target_compile_definitions(windows_dock_redraw PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_link_libraries(windows_dock_redraw PRIVATE user32 comctl32)
+  add_test(NAME windows_dock_redraw COMMAND windows_dock_redraw)
+endif()
+
 add_executable(diagnostics_tests diagnostics_tests.cpp)
 target_link_libraries(diagnostics_tests PRIVATE reaweb_core)
 add_test(NAME diagnostics COMMAND diagnostics_tests)

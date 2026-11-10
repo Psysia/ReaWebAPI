@@ -11,4 +11,5 @@ def source_version(root=ROOT):
                       cmake, re.MULTILINE | re.IGNORECASE)
     if not match or not re.fullmatch(r'[0-9]+(?:\.[0-9]+){0,3}', match.group(1)):
         raise ValueError('CMakeLists.txt must declare project(ReaWebAPI VERSION <major>[.<minor>[.<patch>[.<tweak>]]])')
-    return match.group(1)
+    patch = re.search(r'^set\(REAWEB_PRS_PATCH (\d+)\)', cmake, re.MULTILINE)
+    return match.group(1) + (f'-prs.{patch.group(1)}' if patch else '')
