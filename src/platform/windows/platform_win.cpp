@@ -159,6 +159,10 @@ class WinWindow final : public Window, public std::enable_shared_from_this<WinWi
   std::unique_ptr<WinDevTools> devtools_;
   static constexpr UINT toggle_devtools_message = DevToolsKeys::toggle_message;
   static constexpr UINT focus_page_message = WM_APP + 74;
+  static constexpr UINT finish_dock_message = WM_APP + 79;
+  unsigned dock_transition_depth_ = 0;
+  bool dock_transition_pending_ = false, dock_finish_queued_ = false;
+  bool dock_focus_pending_ = false, page_focus_queued_ = false;
   HWND hosted_parking_ = nullptr;
   RECT floating_rect_{};
   bool maximized_ = false;
@@ -283,7 +287,16 @@ class WinWindow final : public Window, public std::enable_shared_from_this<WinWi
     }
     return wide("Dock " + escaped + " in Docker");
   }
+  void queue_page_focus() {
+    if (!controller_ || dock_transition_pending_ || page_focus_queued_ || !hwnd_ || closed_) return;
+    page_focus_queued_ = PostMessageW(hwnd_, focus_page_message, 0, 0) != FALSE;
+  }
+  void queue_dock_finish() {
+    if (!dock_finish_queued_ && hwnd_ && !closed_)
+      dock_finish_queued_ = PostMessageW(hwnd_, finish_dock_message, 0, 0) != FALSE;
+  }
   void layout() {
+    if (dock_transition_pending_) return;
     RECT rect{}; GetClientRect(hwnd_, &rect);
     if (devtools_) rect = devtools_->layout(rect);
     if (controller_) controller_->put_Bounds(rect);
@@ -301,7 +314,7 @@ public:
     if (self) {
       if (self->overlay_) {
         if (msg == WM_WINDOWPOSCHANGING) self->overlay_->position(reinterpret_cast<WINDOWPOS*>(lp));
-        if (msg == WinOverlay::apply_message || msg == WM_MOVE || msg == WM_SIZE || msg == WM_DPICHANGED || msg == WM_CAPTURECHANGED) {
+        if (!self->dock_transition_pending_ && (msg == WinOverlay::apply_message || msg == WM_MOVE || msg == WM_SIZE || msg == WM_DPICHANGED || msg == WM_CAPTURECHANGED)) {
           try { self->overlay_->synchronize(); } catch (const std::exception& e) { self->fail(e.what()); }
         }
         if (msg == WM_WINDOWPOSCHANGED) self->overlay_->repair();
@@ -339,7 +352,7 @@ public:
       }
       if (self->options_.frameless && !self->floating() &&
           (msg == WM_NCLBUTTONDOWN || msg == WM_NCLBUTTONDBLCLK)) return 0;
-      if (!self->options_.hosted && (msg == WM_WINDOWPOSCHANGED || (msg == WM_STYLECHANGED && wp == static_cast<WPARAM>(GWL_STYLE))))
+      if (!self->options_.hosted && !self->dock_transition_pending_ && (msg == WM_WINDOWPOSCHANGED || (msg == WM_STYLECHANGED && wp == static_cast<WPARAM>(GWL_STYLE))))
         self->dock_redraw_.sync(hwnd);
       if (msg == WM_STYLECHANGING && wp == static_cast<WPARAM>(GWL_STYLE)) {
         reinterpret_cast<STYLESTRUCT*>(lp)->styleNew |= WS_CLIPCHILDREN;
@@ -360,7 +373,7 @@ public:
         return 0;
       }
       if (msg == WM_SHOWWINDOW) {
-        if (wp && !self->options_.hosted) self->icon_.refresh(hwnd, self->icon_host(true));
+        if (wp && !self->options_.hosted && !self->dock_transition_pending_) self->icon_.refresh(hwnd, self->icon_host(true));
         else self->cursor_.finish();
       }
       if (msg == WM_SYSCOMMAND && (wp & 0xfff0) == SC_KEYMENU && self->options_.routes_shortcuts && self->options_.routes_shortcuts()) return 0;
@@ -385,15 +398,33 @@ public:
       } else if (msg == WM_SIZE && self->controller_) {
         self->layout();
       } else if (msg == WM_MOVE && self->controller_) {
-        self->controller_->NotifyParentWindowPositionChanged();
+        if (!self->dock_transition_pending_) self->controller_->NotifyParentWindowPositionChanged();
       } else if (msg == WM_SETFOCUS && self->controller_) {
         // DevTools shares the host's input queue across processes. Finish the
         // focus notification before calling back into WebView2.
-        PostMessageW(hwnd, focus_page_message, 0, 0);
+        self->queue_page_focus();
       } else if (msg == focus_page_message) {
-        if (!self->closed_ && self->controller_ && GetFocus() == hwnd &&
+        self->page_focus_queued_ = false;
+        if (!self->closed_ && !self->dock_transition_pending_ && self->controller_ && GetFocus() == hwnd &&
             GetForegroundWindow() == GetAncestor(hwnd, GA_ROOT))
           self->controller_->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+        return 0;
+      } else if (msg == finish_dock_message) {
+        self->dock_finish_queued_ = false;
+        // A nested host message pump may deliver this during another transition.
+        // Its outer completion will enqueue a fresh notification.
+        if (self->closed_ || self->dock_transition_depth_) return 0;
+        self->dock_transition_pending_ = false;
+        try {
+          self->dock_redraw_.sync(hwnd);
+          self->icon_.refresh(hwnd, self->icon_host());
+          if (self->overlay_) self->overlay_->synchronize();
+          self->layout();
+          if (self->controller_) self->controller_->NotifyParentWindowPositionChanged();
+          const bool focus = self->dock_focus_pending_; self->dock_focus_pending_ = false;
+          if (focus) self->focus();
+          else if (GetFocus() == hwnd) self->queue_page_focus();
+        } catch (const std::exception& error) { self->fail(error.what()); }
         return 0;
       } else if (msg == WM_CLOSE || (msg == WM_COMMAND && LOWORD(wp) == IDCANCEL && !HIWORD(wp) && !lp)) {
         if (self->options_.on_close) self->options_.on_close(); else self->closed_ = true;
@@ -485,7 +516,7 @@ public:
       check(controller_->get_CoreWebView2(&webview_), "get_CoreWebView2");
       check(controller_->put_IsVisible(TRUE), "Activate prepared WebView");
       configure();
-      if (visible() && GetFocus() == hwnd_) controller_->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+      if (visible() && GetFocus() == hwnd_) queue_page_focus();
       return;
     }
     auto weak = weak_from_this();
@@ -506,7 +537,7 @@ public:
           check(controller->get_CoreWebView2(&self->webview_), "get_CoreWebView2");
           self->configure();
           if (self->visible() && GetFocus() == self->hwnd_)
-            self->controller_->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+            self->queue_page_focus();
         } catch (const std::exception& e) { self->fail(e.what()); }
         return S_OK;
       }).Get());
@@ -718,6 +749,10 @@ public:
     return hwnd_ && (focus == hwnd_ || IsChild(hwnd_, focus));
   }
   void tick() override {
+    if (dock_transition_pending_) {
+      if (!dock_transition_depth_) queue_dock_finish();
+      return;
+    }
     if (overlay_) overlay_->repair();
     if (!closed_ && startup_.expired()) { fail("WebView2 initial frame did not become available within 15 seconds"); return; }
     if (!closed_ && startup_.present()) {
@@ -757,13 +792,14 @@ public:
   }
   void focus() override {
     if (closed_ || !hwnd_ || startup_.cancelled()) return;
+    if (dock_transition_pending_) { dock_focus_pending_ = true; return; }
     if (startup_.pending()) { startup_.show(true); startup_foreground_ = GetForegroundWindow(); tick(); }
     if (closed_ || startup_.cancelled()) return;
     ShowWindow(hwnd_, SW_SHOWNA);
     if (IsIconic(hwnd_)) ShowWindow(hwnd_, SW_RESTORE);
     SetForegroundWindow(GetAncestor(hwnd_, GA_ROOT));
     SetFocus(hwnd_);
-    if (controller_) controller_->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+    queue_page_focus();
   }
   void set_title(const std::string& title) override { SetWindowTextW(hwnd_, wide(title).c_str()); }
   std::vector<int> icon_sizes() const override {
@@ -986,6 +1022,26 @@ public:
     if (maximized_) ShowWindow(hwnd_, SW_RESTORE);
     GetWindowRect(hwnd_, &floating_rect_);
   }
+  bool dock_transition_pending() const override { return dock_transition_pending_; }
+  void dock_transition(const std::function<void()>& action) override {
+    ++dock_transition_depth_;
+    dock_transition_pending_ = true;
+    const auto finish = [this] {
+      if (!--dock_transition_depth_) queue_dock_finish();
+    };
+    try {
+      // Shared suspension preserves REAPER's native redraw batching even when
+      // other WebViews remain in this Docker. Release its decoration while the
+      // host is still intact, before DockWindowRemove can tear it down.
+      WinDockRedraw::Transition redraw(dock_redraw_);
+      if (dock_transition_depth_ == 1) {
+        icon_.detach_dock();
+        cursor_.finish();
+      }
+      action();
+    } catch (...) { finish(); throw; }
+    finish();
+  }
   void restore_floating() override {
     SetParent(hwnd_, nullptr);
     SetWindowLongPtrW(hwnd_, GWL_STYLE, floating_style());
@@ -995,11 +1051,11 @@ public:
     // Refresh it as a top-level window, unless the first frame still needs the empty region.
     if (!startup_region_) SetWindowRgn(hwnd_, nullptr, FALSE);
     region_width_ = -1;
-    icon_.refresh(hwnd_);
+    if (!dock_transition_pending_) icon_.refresh(hwnd_);
     restore_placement({{"x", floating_rect_.left}, {"y", floating_rect_.top},
       {"width", floating_rect_.right - floating_rect_.left}, {"height", floating_rect_.bottom - floating_rect_.top}, {"maximized", maximized_}});
     if (startup_.pending() && startup_.wanted()) ShowWindow(hwnd_, SW_SHOWNA);
-    if (controller_) controller_->NotifyParentWindowPositionChanged();
+    if (controller_ && !dock_transition_pending_) controller_->NotifyParentWindowPositionChanged();
     if (options_.frameless) evaluate("window.__reawebDragRegionsActive?.(true);");
     update_region();
     if (!startup_.pending()) {

@@ -59,6 +59,7 @@ class WinIcon {
   }
 public:
   ~WinIcon() { release_dock(); if (small_) DestroyIcon(small_); if (large_) DestroyIcon(large_); }
+  void detach_dock() { release_dock(); }
   void refresh(HWND window, HWND dock = nullptr) {
     if (!small_ && !large_ && visible_) dock = nullptr;
     if (dock_ != dock || (dock_ && GetPropW(dock_, dock_owner) != this)) release_dock();

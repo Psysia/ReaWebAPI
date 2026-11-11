@@ -522,34 +522,36 @@ bool Runtime::set_docked(int id, bool docked) {
   // its visibility and restore it afterwards. Backends whose native window stays
   // untouched keep their own handling.
   const bool was_visible = reparents ? session.window->visibility_requested() : true;
-  if (docked) {
-    persist(session);
-    if (reparents) {
-      // Re-register the remembered dock id before the Docker takes the window,
-      // so it returns to the same slot instead of a freshly assigned one.
-      int saved_dock = -1;
-      if (session.pending_state.is_object()) saved_dock = session.pending_state.value("dockId", -1);
-      if (saved_dock < 0 && session.saved_state.is_object()) saved_dock = session.saved_state.value("dockId", -1);
-      if (dock_.remember && saved_dock >= 0) dock_.remember(session.ident, saved_dock);
-    }
-    session.window->prepare_dock();
-    dock_.add(handle, session.title, session.ident);
-    if (!is_docked(id)) {
+  session.window->dock_transition([&] {
+    if (docked) {
+      persist(session);
+      if (reparents) {
+        // Re-register the remembered dock id before the Docker takes the window,
+        // so it returns to the same slot instead of a freshly assigned one.
+        int saved_dock = -1;
+        if (session.pending_state.is_object()) saved_dock = session.pending_state.value("dockId", -1);
+        if (saved_dock < 0 && session.saved_state.is_object()) saved_dock = session.saved_state.value("dockId", -1);
+        if (dock_.remember && saved_dock >= 0) dock_.remember(session.ident, saved_dock);
+      }
+      session.window->prepare_dock();
+      dock_.add(handle, session.title, session.ident);
+      if (!is_docked(id)) {
+        session.window->restore_floating();
+        if (reparents && !was_visible) session.window->set_visible(false);
+        session.icon_dirty = true; refresh_icon(session);
+        throw Error("DOCK_FAILED", "REAPER did not accept the window into its Docker");
+      }
+      if (!session.window->presentation_pending()) dock_.activate(handle);
+      if (reparents && was_visible) session.window->set_visible(true);
+    } else {
+      const auto index = dock_.index(handle);
+      if (dock_.remember && index >= 0) dock_.remember(session.ident, index);
+      session.window->prepare_undock();
+      dock_.remove(handle);
       session.window->restore_floating();
       if (reparents && !was_visible) session.window->set_visible(false);
-      session.icon_dirty = true; refresh_icon(session);
-      throw Error("DOCK_FAILED", "REAPER did not accept the window into its Docker");
     }
-    if (!session.window->presentation_pending()) dock_.activate(handle);
-    if (reparents && was_visible) session.window->set_visible(true);
-  } else {
-    const auto index = dock_.index(handle);
-    if (dock_.remember && index >= 0) dock_.remember(session.ident, index);
-    session.window->prepare_undock();
-    dock_.remove(handle);
-    session.window->restore_floating();
-    if (reparents && !was_visible) session.window->set_visible(false);
-  }
+  });
   session.preserve_dock = false;
   session.icon_dirty = true; refresh_icon(session);
   return is_docked(id);
@@ -559,7 +561,10 @@ void Runtime::detach(const Session& session) {
   if (session.jsfx) return;
   if (dock_.index && dock_.remove) {
     auto handle = session.window->native_handle();
-    if (handle && dock_.index(handle) >= 0) dock_.remove(handle);
+    if (handle && dock_.index(handle) >= 0) session.window->dock_transition([&] {
+      session.window->prepare_undock();
+      dock_.remove(handle);
+    });
   }
 }
 
@@ -570,6 +575,7 @@ void Runtime::set_title(Session& s, const std::string& title) {
 
 void Runtime::refresh_icon(Session& s) {
   if (s.jsfx) return;
+  if (s.window->dock_transition_pending()) return;
   auto target = s.window->icon_target();
   if (s.icon_dirty || target != s.icon_target) {
     s.icon_target = target; s.icon_dirty = false;

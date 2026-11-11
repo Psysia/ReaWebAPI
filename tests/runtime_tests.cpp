@@ -47,6 +47,16 @@ struct FakeWindow : Window {
   std::vector<IconBitmap> icons;
   bool reject_icon = false;
   bool icon_visible = true;
+  bool dock_transition_active = false;
+  int dock_transitions = 0, undock_preparations = 0;
+  void dock_transition(const std::function<void()>& action) override {
+    CHECK(!dock_transition_active);
+    dock_transition_active = true; ++dock_transitions;
+    try { action(); } catch (...) { dock_transition_active = false; throw; }
+    dock_transition_active = false;
+  }
+  bool dock_transition_pending() const override { return dock_transition_active; }
+  void prepare_undock() override { CHECK(dock_transition_active); ++undock_preparations; }
   int icon_target_generation = 0;
   int icon_changes = 0;
   void* icon_target() const override { return reinterpret_cast<void*>(uintptr_t(icon_target_generation + 1)); }
@@ -304,8 +314,15 @@ int main() {
     std::set<void*> docked;
     std::vector<std::string> errors;
     DockApi docks{nullptr,
-      [&](void* h, const std::string&, const std::string& ident) { CHECK(ident.find("ReaWebAPI:") == 0); docked.insert(h); },
-      [&](void* h) { docked.erase(h); }, [&](void* h) { return docked.count(h) ? 3 : -1; }, [](void*) {}};
+      [&](void* h, const std::string&, const std::string& ident) {
+        CHECK(static_cast<FakeWindow*>(h)->dock_transition_active);
+        CHECK(ident.find("ReaWebAPI:") == 0); docked.insert(h);
+      },
+      [&](void* h) {
+        auto& window = *static_cast<FakeWindow*>(h);
+        CHECK(window.dock_transition_active && window.undock_preparations > 0);
+        docked.erase(h);
+      }, [&](void* h) { return docked.count(h) ? 3 : -1; }, [](void*) {}};
     {
       auto keyboard_docks = docks;
       std::string keys;

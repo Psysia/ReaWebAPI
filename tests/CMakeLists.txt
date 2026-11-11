@@ -445,6 +445,15 @@ if(WIN32 AND REAWEB_BUILD_EXTENSION)
   target_include_directories(windows_resize PRIVATE "${webview2_SOURCE_DIR}/build/native/include")
   target_compile_definitions(windows_resize PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
   target_compile_options(windows_resize PRIVATE /utf-8)
+  add_executable(windows_dock_transition windows_dock_transition.cpp)
+  target_link_libraries(windows_dock_transition PRIVATE reaweb_core
+    "${webview2_SOURCE_DIR}/build/native/x64/WebView2LoaderStatic.lib"
+    ole32 oleaut32 user32 gdi32 shlwapi shell32 version advapi32 uuid comctl32 dwmapi)
+  target_include_directories(windows_dock_transition PRIVATE "${webview2_SOURCE_DIR}/build/native/include")
+  target_compile_definitions(windows_dock_transition PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_compile_options(windows_dock_transition PRIVATE /utf-8)
+  add_test(NAME windows_dock_transition COMMAND windows_dock_transition)
+  set_tests_properties(windows_dock_transition PROPERTIES TIMEOUT 180)
   add_executable(windows_color_profile EXCLUDE_FROM_ALL windows_color_profile.cpp
     "${PROJECT_SOURCE_DIR}/src/plugin/preferences.cpp" "${PROJECT_SOURCE_DIR}/src/plugin/preferences.rc")
   target_link_libraries(windows_color_profile PRIVATE reaweb_core

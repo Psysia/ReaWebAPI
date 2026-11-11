@@ -17,7 +17,7 @@ manifest = {
     'schema': 'PsyReaSFX-ReaWebAPI-Mirror-v1', 'repository': 'Psysia/ReaWebAPI',
     'upstream': 'zaibuyidao/ReaWebAPI', 'modified': True,
     'upstream_commit': 'f3d83ee333a5df0f1242b20efc706ce5a893dabf',
-    'patches': ['windows-dock-top-level-redraw'],
+    'patches': ['windows-dock-top-level-redraw', 'windows-dock-transition-lifetime'],
     'tag': 'v' + source_version(), 'commit': revision,
     'contracts': {'protocol': 1, 'runtime': 2, 'web': 1, 'max_message_bytes': 1048576},
     'files': {p.name: hashlib.sha256(p.read_bytes()).hexdigest()

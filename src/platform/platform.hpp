@@ -68,6 +68,10 @@ public:
   virtual unsigned background_color() const { return 0xffffff; }
   virtual void prepare_dock() {}
   virtual void prepare_undock() {}
+  // Structural Docker operations may dispatch native messages synchronously.
+  // Backends can defer browser work until the host has finished changing parents.
+  virtual void dock_transition(const std::function<void()>& action) { action(); }
+  virtual bool dock_transition_pending() const { return false; }
   virtual void restore_floating() {}
   virtual void show_after_create() {}
   // True when docking reparents the native window into REAPER's Docker and hides
