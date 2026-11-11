@@ -162,7 +162,7 @@ class WinWindow final : public Window, public std::enable_shared_from_this<WinWi
   static constexpr UINT finish_dock_message = WM_APP + 79;
   unsigned dock_transition_depth_ = 0;
   bool dock_transition_pending_ = false, dock_finish_queued_ = false;
-  bool dock_focus_pending_ = false, page_focus_queued_ = false;
+  bool dock_focus_pending_ = false, page_focus_queued_ = false, dock_maximize_pending_ = false;
   HWND hosted_parking_ = nullptr;
   RECT floating_rect_{};
   bool maximized_ = false;
@@ -421,6 +421,10 @@ public:
           if (self->overlay_) self->overlay_->synchronize();
           self->layout();
           if (self->controller_) self->controller_->NotifyParentWindowPositionChanged();
+          if (self->options_.frameless)
+            self->evaluate(self->floating() ? "window.__reawebDragRegionsActive?.(true);" : "window.__reawebDragRegionsActive?.(false);");
+          const bool maximize = self->dock_maximize_pending_; self->dock_maximize_pending_ = false;
+          if (maximize && self->floating() && !self->startup_.pending()) ShowWindow(hwnd, SW_SHOWMAXIMIZED);
           const bool focus = self->dock_focus_pending_; self->dock_focus_pending_ = false;
           if (focus) self->focus();
           else if (GetFocus() == hwnd) self->queue_page_focus();
@@ -1003,7 +1007,7 @@ public:
   void prepare_dock() override {
     if (options_.overlay.floating_only()) throw Error("DOCK_UNAVAILABLE", "Overlay and mouse policies require a floating window");
     if (options_.transparent) throw Error("DOCK_UNAVAILABLE", "Transparent windows require a standalone floating host");
-    if (options_.frameless) evaluate("window.__reawebDragRegionsActive?.(false);");
+    if (options_.frameless && !dock_transition_pending_) evaluate("window.__reawebDragRegionsActive?.(false);");
     if (!startup_region_) SetWindowRgn(hwnd_, nullptr, TRUE);
     region_width_ = -1;
     if (startup_.pending() && !startup_region_) {
@@ -1056,10 +1060,13 @@ public:
       {"width", floating_rect_.right - floating_rect_.left}, {"height", floating_rect_.bottom - floating_rect_.top}, {"maximized", maximized_}});
     if (startup_.pending() && startup_.wanted()) ShowWindow(hwnd_, SW_SHOWNA);
     if (controller_ && !dock_transition_pending_) controller_->NotifyParentWindowPositionChanged();
-    if (options_.frameless) evaluate("window.__reawebDragRegionsActive?.(true);");
+    if (options_.frameless && !dock_transition_pending_) evaluate("window.__reawebDragRegionsActive?.(true);");
     update_region();
     if (!startup_.pending()) {
-      if (maximized_) ShowWindow(hwnd_, SW_SHOWMAXIMIZED);
+      if (maximized_) {
+        if (dock_transition_pending_) dock_maximize_pending_ = true;
+        else ShowWindow(hwnd_, SW_SHOWMAXIMIZED);
+      }
       focus();
     }
   }

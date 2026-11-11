@@ -1,4 +1,5 @@
-// Real WebView2 and process-owned offscreen windows. Never launches REAPER.
+// Real WebView2 and process-owned windows. Most cases stay offscreen; the
+// maximize regression briefly occupies the CI desktop. Never launches REAPER.
 #include "../src/platform/windows/platform_win.cpp"
 #include <chrono>
 #include <fstream>
@@ -56,7 +57,21 @@ int main() {
     WindowOptions options;
     options.entry = entry; options.title = "Dock transition regression";
     options.parent = host.value; options.hidden = true;
-    options.script = "addEventListener('DOMContentLoaded',()=>chrome.webview.postMessage('ready'));";
+    options.script = R"JS(
+      window.__testDragStates = [];
+      (() => {
+        const define = Object.defineProperty;
+        Object.defineProperty = function(target, name, descriptor) {
+          if (target === window && name === '__reawebDragRegionsActive') {
+            Object.defineProperty = define;
+            const update = descriptor.value;
+            descriptor.value = value => { window.__testDragStates.push(!!value); return update(value); };
+          }
+          return define(target, name, descriptor);
+        };
+      })();
+      addEventListener('DOMContentLoaded',()=>chrome.webview.postMessage('ready'));
+    )JS";
     options.on_message = [&](std::string text) {
       if (text == "ready") ready = true;
       else if (text.rfind("snapshot:", 0) == 0) {
@@ -88,7 +103,8 @@ int main() {
     const auto snapshot = [&] {
       const auto wanted = ++sequence;
       window->evaluate("chrome.webview.postMessage('snapshot:'+JSON.stringify({sequence:" + std::to_string(wanted) +
-        ",width:innerWidth,height:innerHeight,scale:devicePixelRatio,value:document.querySelector('#state').value}));");
+        ",width:innerWidth,height:innerHeight,scale:devicePixelRatio,value:document.querySelector('#state').value,"
+        "dragStates:window.__testDragStates.slice()}));");
       pump([&] { return observation.is_object() && observation.value("sequence", 0u) == wanted; }, "page observation");
       CHECK(observation["value"] == "retained-page-state");
       return observation;
@@ -165,6 +181,79 @@ int main() {
       stable_viewport();
     }
 
+    // Frameless drag-region scripts must follow the completed native parent
+    // change, even when a host callback pumps browser messages while removing.
+    CHECK(window->window_capabilities()["frameless"] == true);
+    window->set_frameless(true);
+    CHECK(window->frameless_active());
+    const auto floating_drag = snapshot()["dragStates"];
+    CHECK(!floating_drag.empty() && floating_drag.back() == true);
+    {
+      NativeWindow pane(host.value, L"Frameless Docker fixture");
+      window->dock_transition([&] {
+        window->prepare_dock(); ShowWindow(hwnd, SW_HIDE);
+        SetParent(hwnd, pane.value);
+        SetWindowLongPtrW(hwnd, GWL_STYLE, WS_CHILD | WS_VISIBLE);
+        CHECK(SetWindowPos(hwnd, nullptr, 0, 0, 480, 300, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED));
+        CHECK(snapshot()["dragStates"] == floating_drag);
+      });
+      pump([&] { return !window->dock_transition_pending(); }, "frameless dock completion");
+      CHECK(!window->frameless_active());
+      const auto docked_drag = stable_viewport()["dragStates"];
+      CHECK(docked_drag.size() == floating_drag.size() + 1 && docked_drag.back() == false);
+      SetFocus(sentinel.value); CHECK(GetFocus() == sentinel.value);
+      window->dock_transition([&] {
+        window->prepare_undock(); ShowWindow(hwnd, SW_HIDE);
+        SetParent(hwnd, nullptr);
+        window->restore_floating(); offscreen(hwnd, 670, 430);
+        CHECK(snapshot()["dragStates"] == docked_drag);
+        CHECK(GetFocus() == sentinel.value && !style_visible(hwnd));
+      });
+      pump([&] { return !window->dock_transition_pending() && window->focused(); }, "frameless floating completion");
+      const auto restored_drag = stable_viewport()["dragStates"];
+      CHECK(window->frameless_active());
+      CHECK(restored_drag.size() == docked_drag.size() + 1 && restored_drag.back() == true);
+    }
+    window->set_frameless(false);
+
+    // Maximizing is intentionally visible on the isolated CI desktop. Returning
+    // to a maximized floating window must not activate it inside host removal.
+    for (const bool frameless : {false, true}) {
+      window->set_frameless(frameless);
+      ShowWindow(hwnd, SW_SHOWMAXIMIZED);
+      pump([&] { return IsZoomed(hwnd) != FALSE; }, "initial maximization");
+      stable_viewport();
+      NativeWindow pane(host.value, L"Maximized Docker fixture");
+      window->dock_transition([&] {
+        window->prepare_dock(); ShowWindow(hwnd, SW_HIDE);
+        SetParent(hwnd, pane.value);
+        SetWindowLongPtrW(hwnd, GWL_STYLE, WS_CHILD | WS_VISIBLE);
+        CHECK(SetWindowPos(hwnd, nullptr, 0, 0, 510, 330, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED));
+      });
+      pump([&] { return !window->dock_transition_pending(); }, "maximized dock completion");
+      CHECK(!IsZoomed(hwnd));
+      stable_viewport();
+      SetFocus(sentinel.value); CHECK(GetFocus() == sentinel.value);
+      window->dock_transition([&] {
+        window->prepare_undock(); ShowWindow(hwnd, SW_HIDE);
+        SetParent(hwnd, nullptr); window->restore_floating();
+        CHECK(!IsZoomed(hwnd) && !style_visible(hwnd));
+        CHECK(GetFocus() == sentinel.value);
+        snapshot(); // Nested dispatch cannot reveal or maximize the window early.
+        CHECK(window->dock_transition_pending());
+        CHECK(!IsZoomed(hwnd) && !style_visible(hwnd));
+        CHECK(GetFocus() == sentinel.value);
+      });
+      CHECK(!IsZoomed(hwnd) && !style_visible(hwnd));
+      pump([&] { return !window->dock_transition_pending() && IsZoomed(hwnd) && window->focused(); }, "maximized floating completion");
+      CHECK(window->visible() && GetWindow(hwnd, GW_OWNER) == host.value);
+      stable_viewport();
+      ShowWindow(hwnd, SW_RESTORE); offscreen(hwnd, 680, 440);
+      CHECK(!IsZoomed(hwnd));
+      stable_viewport();
+    }
+    window->set_frameless(false);
+
     bool caught = false;
     try {
       window->dock_transition([] { throw std::runtime_error("injected host failure"); });
@@ -193,7 +282,8 @@ int main() {
     dispatch_slice();
     platform.reset();
     std::cout << "PASS: real WebView2, six dock/float cycles, deferred viewport/focus, nested message pump, "
-      "page state, owner, last-tab host destruction, exception recovery and close with queued completion\n";
+      "page state, owner, frameless scripts, framed/frameless maximized restoration, last-tab host destruction, "
+      "exception recovery and close with queued completion\n";
     return 0;
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }
