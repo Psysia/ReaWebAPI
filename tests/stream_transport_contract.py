@@ -27,12 +27,28 @@ def connect(info, origin='http://127.0.0.1:9000'):
     return sock
 
 
-def exact(sock, length):
-    output = bytearray()
-    while len(output) < length:
-        chunk = sock.recv(length-len(output))
-        assert chunk, 'premature disconnect'
-        output.extend(chunk)
+def exact(sock, length, timeout=None):
+    output = bytearray(length)
+    view = memoryview(output)
+    received = 0
+    if timeout is not None:
+        previous_timeout = sock.gettimeout()
+        deadline = time.monotonic() + timeout
+    try:
+        while received < length:
+            if timeout is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError
+                sock.settimeout(remaining)
+            count = sock.recv_into(view[received:])
+            assert count, f'Premature disconnect after {received}/{length} bytes'
+            received += count
+    except TimeoutError as error:
+        raise TimeoutError(f'Read timed out after {received}/{length} bytes') from error
+    finally:
+        if timeout is not None:
+            sock.settimeout(previous_timeout)
     return output
 
 
@@ -43,18 +59,29 @@ def receive(sock):
         length = struct.unpack('!H', exact(sock, 2))[0]
     elif length == 127:
         length = struct.unpack('!Q', exact(sock, 8))[0]
-    data = exact(sock, length)
     if header[0] & 15 == 8:
+        assert length <= 125
+        data = exact(sock, length)
         assert data[2:] == b'STREAM_CLOSED'
         return None
+    shared = first.get('sharedVideo') and sock is a
+    header_size = 80 if stream_version == 2 else 40
+    assert length == header_size + (4 if shared else first['maxBytes'])
+    # Allow a bounded transfer window for large video frames on slower runners.
+    timeout = 15 if video and length > 16 * 1024 * 1024 else None
+    data = exact(sock, length, timeout)
     assert data[:4] == b'RWS'+bytes([stream_version])
     sequence = struct.unpack_from('<Q', data, 8)[0]
-    assert data[5] == int(video and sequence % 3 == 1), 'Video discontinuity flag leaked or was lost'
-    header = 80 if stream_version == 2 else 40
-    assert len(data) == header + first['maxBytes']
+    assert data[5] == int(video and sequence % 3 == 1) | (2 if shared else 0), 'Video discontinuity flag leaked or was lost'
+    if shared:
+        assert struct.unpack_from('<Q', data, 32)[0] == first['maxBytes']
+        slot = struct.unpack_from('<I', data, 40)[0]
+        assert slot == shared_slots[0], 'Shared video reused an unacknowledged slot'
+        shared_slots[0] ^= 1
+        return sequence
     if stream_version == 2:
         assert struct.unpack_from('<QQQdBB',data,40) == (99,9007199254740992+sequence,17,0.5,1,1)
-    assert data[header:] == bytes([sequence & 255]) * first['maxBytes']
+    assert data.count(sequence & 255, header_size) == first['maxBytes'], f'Corrupt payload for frame {sequence}'
     return sequence
 
 
@@ -66,6 +93,7 @@ process = subprocess.Popen(sys.argv[1:], stdin=subprocess.PIPE, stdout=subproces
 jitter = sys.argv[-1] == 'jitter'
 burst = sys.argv[-1] == 'burst'
 video = len(sys.argv) > 2 and sys.argv[2].startswith('video')
+shared_slots = [0]
 try:
     first, second = json.loads(process.stdout.readline())
     stream_version = first.get('layoutVersion', 1)
@@ -104,7 +132,11 @@ try:
         if video:
             assert receive(a) == 4, 'The second in-flight frame must stay ordered'
             ack(a)
-        assert receive(a) == (6 if video else 7), 'A stalled consumer retained an unbounded backlog'
+        next_a = receive(a)
+        if video and not first.get('sharedVideo') and next_a == 5:
+            # Large frames may fill the socket before the third send can begin.
+            ack(a); next_a = receive(a)
+        assert next_a == (6 if video else 7), 'A stalled consumer retained an unbounded backlog'
         if video:
             ack(a); assert receive(a) == 7
         seq_b = 7
@@ -125,15 +157,20 @@ try:
         if video:
             assert next_a > seq_a
             ack(a); next_a = receive(a)
+            if not first.get('sharedVideo'):
+                ack(a); next_a = receive(a)
         assert next_a > seq_a + 10, (seq_a, next_a)
     a.close()
+    ack_pending = not burst  # Burst frames were already acknowledged inside the loop.
     while True:
-        ack(b)
+        if ack_pending:
+            ack(b)
         sequence = receive(b)
         if sequence is None:
             break
         assert sequence > seq_b
         seq_b = sequence
+        ack_pending = True
     b.close()
     process.stdin.write('done\n')
     process.stdin.flush()
