@@ -37,6 +37,7 @@ struct BackendState {
   bool supported = true, active = false, malformed = false, throws = false;
   bool i420 = false;
   bool directdraw_hd = false;
+  int native_reads = 0;
   int matrix = 1;
   VideoColorConversion conversion = VideoColorConversion::reaper_neon;
   int support_checks = 0, reads = 0, stops = 0, width = 2, height = 1;
@@ -67,6 +68,9 @@ struct Backend final : VideoBackend {
       capture({planes.data(), state->width, state->height, stride, VideoPixelFormat::i420, true, state->matrix, state->conversion});
     }
     return state->next;
+  }
+  VideoRead read_native_i420(bool changed, const Capture& capture) override {
+    ++state->native_reads; return read_i420(changed, capture);
   }
   void stop() override { ++state->stops; state->active = false; }
 };
@@ -234,7 +238,9 @@ void resolution_profiles() {
   try { f.video->open({{"width", 2}, {"height", 1}}, 2); } catch (const Error& e) { conflict = e.code == "VIDEO_PROFILE_CONFLICT"; }
   CHECK(conflict && f.video->state()["subscribers"] == 1);
   f.backend->width = 3; f.step();
-  CHECK(f.video->state()["status"] == "closed" && f.video->state()["error"] == "VIDEO_RESOLUTION_CHANGED");
+  CHECK(f.video->state()["status"] == "ready" && f.video->state()["stream"] == name);
+  CHECK(f.video->state()["width"] == 3 && f.video->state()["subscribers"] == 1);
+  CHECK(f.video->open({{"resolution", "source"}}, 2) == name);
   CHECK(f.video->source_info()["width"] == 3);
   f.backend->width = 2;
   f.video->close_window(1); f.video->tick();
@@ -428,6 +434,67 @@ void automatic_rate() {
   CHECK(f.video->state()["updateRate"] == 60 && f.video->state()["targetUpdateRate"] == 60);
   f.video->shutdown();
 }
+void dynamic_resolution() {
+  for (const auto* mode : {"source", "fit", "custom"}) {
+    Fixture f;
+    Json options{{"resolution", mode}, {"updateRate", 60}};
+    if (std::string(mode) != "source") options.update({{"width", 8}, {"height", 6}});
+    const auto name = f.video->open(options, 1);
+    const auto ticket = f.attach(name);
+    CHECK(ticket.value("dynamicResolution", false) == (std::string(mode) != "custom"));
+    f.video->tick();
+    const auto clears = f.cleared();
+    for (const auto size : {std::pair{16, 8}, {32, 16}, {8, 16}, {16, 8}, {2, 1}}) {
+      f.backend->width = size.first; f.backend->height = size.second; f.step();
+      const auto state = f.video->state();
+      CHECK(state["status"] == "ready" && state["stream"] == name && state["subscribers"] == 1);
+      CHECK(f.cleared() == clears && f.video->open(options, 2) == name);
+      int w = size.first, h = size.second;
+      if (std::string(mode) == "custom") { w = 8; h = 6; }
+      else if (std::string(mode) == "fit") {
+        const double scale = std::min({1.0, 8.0 / w, 6.0 / h});
+        w = std::max(1, int(std::floor(w * scale))); h = std::max(1, int(std::floor(h * scale)));
+      }
+      CHECK(state["width"] == w && state["height"] == h);
+      const auto late = f.attach(name, 3);
+      CHECK(late["width"] == w && late["height"] == h);
+      f.streams.detach(late["token"], 3);
+    }
+  }
+  {
+    Fixture f;
+    const auto name = f.video->open({{"resolution", "source"}, {"updateRate", 60}}, 1);
+    f.attach(name); f.video->tick();
+    f.backend->width = 8193; f.step();
+    CHECK(f.video->state()["stream"] == name && f.video->state()["error"] == "VIDEO_RESOLUTION_LIMIT");
+    f.backend->width = 16; f.step();
+    CHECK(f.video->state()["stream"] == name && f.video->state()["status"] == "ready" && f.video->state()["width"] == 16);
+  }
+  Fixture f; f.backend->i420 = true; f.backend->width = 16; f.backend->height = 2;
+  const auto name = f.video->open({{"resolution", "source"}, {"format", "i420"}, {"updateRate", 60}}, 1);
+  f.attach(name); f.video->tick(); const auto clears = f.cleared();
+  for (const auto size : {std::pair{32, 8}, {16, 16}, {64, 4}, {16, 2}}) {
+    f.backend->width = size.first; f.backend->height = size.second; f.step();
+    CHECK(f.video->state()["stream"] == name && f.video->state()["status"] == "ready");
+    CHECK(f.video->state()["width"] == size.first && f.video->state()["height"] == size.second && f.cleared() == clears);
+  }
+}
+void dynamic_pending_seek() {
+  Fixture f;
+  const auto name = f.video->open({{"resolution", "source"}, {"updateRate", 60}}, 1);
+  f.attach(name); f.ready(); const auto clears = f.cleared();
+  f.state.cursor = 7; f.backend->next = VideoRead::pending; f.step();
+  CHECK(f.video->state()["status"] == "ready" && f.video->state()["position"] == 1.25 && f.cleared() == clears);
+  std::this_thread::sleep_for(std::chrono::milliseconds(120)); f.video->tick();
+  CHECK(f.video->state()["status"] == "ready" && f.cleared() == clears);
+  f.backend->width = 3; f.backend->next = VideoRead::ready; f.step();
+  CHECK(f.video->state()["width"] == 3 && f.video->state()["position"] == 7 && f.cleared() == clears);
+  f.state.cursor = 9; f.backend->next = VideoRead::pending; f.step();
+  std::this_thread::sleep_for(std::chrono::milliseconds(510)); f.video->tick();
+  CHECK(f.video->state()["stream"] == name && f.video->state()["status"] == "waiting" && f.cleared() == clears + 1);
+  f.backend->next = VideoRead::ready; f.step();
+  CHECK(f.video->state()["status"] == "ready" && f.video->state()["position"] == 9);
+}
 void fixed_fractional_rates() {
   for (double rate : {1.0, 23.976, 24000.0 / 1001, 24.0, 25.0, 29.97, 30000.0 / 1001,
                       30.0, 48.0, 50.0, 60.0, 75.0}) {
@@ -460,6 +527,29 @@ void automatic_frame_clock() {
   CHECK(f.video->diagnostics()["capturedFrames"] == captured + 1);
   f.state.speed = 2; const auto throttled = f.backend->reads; f.video->tick();
   CHECK(f.backend->reads == throttled);
+}
+void nonaligned_native_i420() {
+  const Json options{{"resolution", "source"}, {"format", "i420"}, {"updateRate", 60}};
+  for (const auto conversion : {VideoColorConversion::reaper_sse, VideoColorConversion::reaper_neon}) {
+    Fixture f; f.backend->i420 = true; f.backend->width = 808; f.backend->height = 1272;
+    f.backend->conversion = conversion;
+    try { f.video->open(options, 1); CHECK(false); }
+    catch (const Error& error) { CHECK(error.code == "VIDEO_FORMAT_UNSUPPORTED"); }
+    const auto name = f.video->open(options, 1, nullptr, true); f.attach(name); f.video->tick();
+    const auto cleared = f.cleared();
+    for (const auto size : {std::pair{1576, 1272}, {744, 1288}, {808, 1272}, {18, 6}, {2, 2}, {32, 8}}) {
+      f.backend->width = size.first; f.backend->height = size.second; f.step();
+      CHECK(f.video->state()["stream"] == name && f.video->state()["status"] == "ready");
+      CHECK(f.video->state()["width"] == size.first && f.video->state()["height"] == size.second);
+      CHECK(f.cleared() == cleared && f.video->diagnostics()["captureFailures"] == 0);
+      CHECK(f.video->open(options, 2, nullptr, true) == name);
+    }
+    CHECK(f.backend->native_reads > 0);
+    f.backend->width = 809; f.step();
+    CHECK(f.video->state()["status"] == "closed" && f.video->state()["error"] == "VIDEO_FORMAT_CHANGED");
+    try { f.video->open(options, 1, nullptr, true); CHECK(false); }
+    catch (const Error& error) { CHECK(error.code == "VIDEO_FORMAT_UNSUPPORTED"); }
+  }
 }
 void native_i420_profiles() {
   const Json options{{"format", "i420"}, {"resolution", "source"}, {"updateRate", "auto"}};
@@ -501,7 +591,7 @@ void native_i420_profiles() {
     CHECK(source["colorConversion"] == expected);
     CHECK(source["nativeFormat"] == "i420" && source["colorMatrix"] == "bt709" && source["colorRange"] == "limited");
     const auto name = f.video->open(options, 1); const auto ticket = f.attach(name);
-    CHECK(ticket["format"] == "i420" && ticket["maxBytes"] == 48 && ticket["stride"] == 16);
+    CHECK(ticket["format"] == "i420" && ticket["maxBytes"] == video_max_frame_bytes && ticket["layoutVersion"] == 3 && ticket["stride"] == 16);
     CHECK(ticket["colorMatrix"] == "bt709" && ticket["colorRange"] == "limited");
     CHECK(ticket["colorConversion"] == expected);
     f.video->tick(); CHECK(f.video->state()["status"] == "ready");
@@ -582,8 +672,8 @@ int main() {
     CHECK(!clock.update(11, 2, 2, 1, 0));
     CHECK(clock.update(11.01, 2.01, 2, 1, 0));
     CHECK(clock.update(11.01, 2.02, 2, 1, 1));
-    pixel_conversion(); native_i420_profiles();
-    resolution_profiles(); scheduler_lifetime(); missing_native_prerequisites(); unused_and_rejection(); sharing_and_lifetime(); clocks_and_invalidations(); source_and_host_changes(); automatic_rate(); fixed_fractional_rates(); automatic_frame_clock();
+    pixel_conversion(); native_i420_profiles(); nonaligned_native_i420();
+    resolution_profiles(); dynamic_resolution(); dynamic_pending_seek(); scheduler_lifetime(); missing_native_prerequisites(); unused_and_rejection(); sharing_and_lifetime(); clocks_and_invalidations(); source_and_host_changes(); automatic_rate(); fixed_fractional_rates(); automatic_frame_clock();
     std::cout << "Video host rejection, consumer ownership, invalidation, clocks and cleanup passed\n";
   } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }
