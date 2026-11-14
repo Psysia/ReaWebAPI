@@ -58,7 +58,7 @@ App 可通过 `app.json.webRuntime.crossOriginIsolation` 选择跨源隔离。�
 
 手动安装时，将原生扩展放入 `UserPlugins/`。Linux 的同架构 `reawebapi-webview-<arch>` 辅助程序也放在该目录，并赋予执行权限。保留 `reawebapi-video-<arch>/` 子目录，以启用工程视频的本地内存传输。
 
-Linux 的 required 跨源隔离需要兼容引擎。安装包提供 `reawebapi-webkit-<arch>/` 时，应将其保留在辅助程序旁。参见[独立运行库构建](docs/linux-webkit-runtime.md)及[验收环境](docs/webkit-isolation-validation.md)。
+Linux 的 required 跨源隔离需要兼容引擎。安装包提供 `reawebapi-webkit-<arch>/` 时，应将其保留在辅助程序旁。参见[独立运行库构建](docs/linux-webkit-runtime.zh-CN.md)。
 
 Linux 复用未变化的 X11 几何信息，通过宿主事件循环读取 WebKit 入站消息。WSL 未提供 DRI3 时，辅助进程使用 GTK 图像后备缓冲以减少绘制停顿。显式设置的 `GDK_RENDERING` 优先。
 
@@ -122,3 +122,5 @@ Windows、macOS 和 Linux 支持原生[隐藏启动](docs/host-api.zh-CN.md#隐�
 ## 工程视频
 
 `reaper.video` 通过 Native Streams 提供共享工程视频帧，支持 Windows 视频工作线程直接接收及 Windows D3D11、macOS Metal 原生共享呈现。仅支持已验证的 REAPER 构建。安装、API、绘制和平台限制见[视频预览](docs/video-preview.zh-CN.md)。
+
+通过 [顺序分块导出](docs/file-export.zh-CN.md) 写入大文件，并兼容原有 `saveBlob()` 调用。

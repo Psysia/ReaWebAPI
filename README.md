@@ -57,7 +57,7 @@ Quit REAPER and extract the platform ZIP into its resource directory, available 
 
 For manual installation, place the native binary in `UserPlugins/`. On Linux, place the matching `reawebapi-webview-<arch>` helper in the same directory and grant it execute permission. Keep the `reawebapi-video-<arch>/` subdirectory for accelerated project-video transport.
 
-Required cross-origin isolation on Linux needs a compatible engine. When provided, retain `reawebapi-webkit-<arch>/` beside the helper. See the [private runtime build](docs/linux-webkit-runtime.md) and [tested environments](docs/webkit-isolation-validation.md).
+Required cross-origin isolation on Linux needs a compatible engine. When provided, retain `reawebapi-webkit-<arch>/` beside the helper. See the [private runtime build](docs/linux-webkit-runtime.md).
 
 Linux reuses unchanged X11 geometry and reads incoming WebKit messages through the host event loop. In WSL without DRI3, the helper uses GTK image backing surfaces to reduce drawing stalls. An explicit `GDK_RENDERING` setting takes precedence.
 
@@ -123,3 +123,5 @@ The [SVG overlay example](examples/windows/overlay/README.md) is a bilingual, si
 ## Project video
 
 `reaper.video` exposes shared project video frames through Native Streams, including direct Windows video-worker delivery and shared native D3D11/Metal presentation on Windows/macOS. Only verified REAPER builds are supported. See [Video Preview](docs/video-preview.md) for installation, API, rendering and platform limits.
+
+Use [sequential file export](docs/file-export.md) for large files while retaining existing `saveBlob()` calls.
