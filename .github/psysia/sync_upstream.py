@@ -79,6 +79,75 @@ def inspect_bundle(path: Path, expected_dll: str) -> bytes:
     return binary
 
 
+def web_contract(runtime: str) -> int:
+    """Read the literal contract from this function, never a nearby declaration.
+
+    This is deliberately not a C++ parser: unfamiliar return shapes fail closed.
+    Tokenizing strings/comments keeps their braces and decoy returns out of the
+    structural scan while allowing capability setup before the final return.
+    """
+    tokens = re.findall(
+        r'\#[^\n]*|/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|'
+        r'[A-Za-z_]\w*|\d+|[^\s]', runtime, re.S)
+    tokens = [token for token in tokens if not token.startswith(("//", "/*"))]
+    signature = ["Json", "Runtime", ":", ":", "web_runtime", "(", "const", "Session", "&", "session", ")", "const", "{"]
+    starts = [i + len(signature) for i in range(len(tokens))
+              if tokens[i:i + len(signature)] == signature]
+    error = "Upstream web capability declaration changed; review before adopting this runtime"
+    if len(starts) != 1:
+        raise ValueError(error)
+    depth = 1
+    returns = []
+    conditional_depth = 0
+    for i in range(starts[0], len(tokens)):
+        token = tokens[i]
+        # Raw strings require a different lexer; do not guess at their contents.
+        if token in ("R", "u8R", "uR", "UR", "LR") and i + 1 < len(tokens) and tokens[i + 1].startswith('"'):
+            raise ValueError(error)
+        if token.startswith("#"):
+            directive = re.match(r"#\s*(\w+)", token)
+            name = directive.group(1) if directive else ""
+            if name in ("if", "ifdef", "ifndef"):
+                conditional_depth += 1
+            elif name == "endif" and conditional_depth:
+                conditional_depth -= 1
+            elif name not in ("else", "elif") or not conditional_depth:
+                raise ValueError(error)
+        if token == "return":
+            if conditional_depth:
+                raise ValueError(error)
+            returns.append((i, depth))
+        if token == "{":
+            depth += 1
+        elif token == "}":
+            depth -= 1
+            if depth == 0:
+                break
+    else:
+        raise ValueError(error)
+    end = i
+    if conditional_depth or len(returns) != 1 or returns[0][1] != 1:
+        raise ValueError(error)
+    if tokens[returns[0][0] - 1] not in (";", "{", "}"):
+        raise ValueError(error)
+    start = returns[0][0] + 1
+    declaration = tokens[start:start + 6]
+    if (len(declaration) != 6 or declaration[:4] != ["{", "{", '"contract"', ","]
+            or not re.fullmatch(r"\d+", declaration[4]) or declaration[5] != "}"):
+        raise ValueError(error)
+    initializer_depth = 0
+    for i in range(start, end):
+        if tokens[i] == "{":
+            initializer_depth += 1
+        elif tokens[i] == "}":
+            initializer_depth -= 1
+            if initializer_depth == 0:
+                break
+    if tokens[i + 1:end] != [";"]:
+        raise ValueError(error)
+    return int(declaration[4])
+
+
 def source_contracts(path: Path, commit: str) -> dict:
     with zipfile.ZipFile(path) as archive:
         prefix = f"ReaWebAPI-{commit}/"
@@ -99,7 +168,7 @@ def source_contracts(path: Path, commit: str) -> dict:
     return {
         "protocol": number(r'\{"protocol",\s*(\d+)\}', core),
         "runtime": number(r'\{"runtime",\s*\{\{"contract",\s*(\d+)\}', core),
-        "web": number(r'Json Runtime::web_runtime\([^)]*\)[^{]*\{\s*return\s*\{\{"contract",\s*(\d+)\}', runtime),
+        "web": web_contract(runtime),
         "max_message_bytes": capacity,
     }
 
