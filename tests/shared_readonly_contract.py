@@ -70,7 +70,8 @@ def main(executable):
                 assert reader.request(source, offset, count)["code"] == "INVALID_ARGUMENT"
             assert reader.request(root / "missing", 0, 0)["code"] == "NOT_FOUND"
             assert reader.request("relative.bin", 0, 0)["code"] == "INVALID_ARGUMENT"
-            assert not reader.request(root, 0, 0)["ok"]
+            assert reader.request(root, 0, 0)["directory"]
+            assert reader.request(root, 0, 1)["code"] == "NOT_FILE"
             assert reader.request(source, mode="threads")["ok"]
             assert hashlib.sha256(source.read_bytes()).hexdigest() == before
             assert sorted(path.name for path in root.iterdir()) == names, "reader created a sidecar"
@@ -126,6 +127,18 @@ def main(executable):
             held = reader.release()
             assert held["ok"] or held["code"] == "FILE_CHANGED"
             assert not wal.exists(), "reader blocked SQLite WAL cleanup"
+            directory = root / "directory-音效"
+            directory.mkdir()
+            reader.request(directory, 0, 0, mode="hold")
+            moved_directory = root / "renamed-directory"
+            subprocess.run([sys.executable, "-c", "import pathlib,sys; pathlib.Path(sys.argv[1]).rename(sys.argv[2])", str(directory), str(moved_directory)], check=True)
+            result = reader.release()
+            assert result["ok"] or result["code"] == "FILE_CHANGED"
+            reader.request(moved_directory, 0, 0, mode="hold")
+            subprocess.run([sys.executable, "-c", "import pathlib,sys; pathlib.Path(sys.argv[1]).rmdir()", str(moved_directory)], check=True)
+            result = reader.release()
+            assert result["ok"] or result["code"] == "FILE_CHANGED"
+            assert not moved_directory.exists()
             print(f"Shared native source reads: PASS (Unicode/bounds/8 threads/325 SQLite commits/{concurrent_reads} concurrent reads/held-handle overwrite, rename, delete/WAL cleanup)")
     finally:
         reader.close()

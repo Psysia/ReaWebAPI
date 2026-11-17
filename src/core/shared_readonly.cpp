@@ -29,7 +29,8 @@ std::string failure(const char* code, unsigned error = 0) {
 struct Snapshot {
   uint64_t size = 0;
   std::string mtime, identity;
-  bool operator==(const Snapshot& other) const { return size == other.size && mtime == other.mtime && identity == other.identity; }
+  bool directory = false;
+  bool operator==(const Snapshot& other) const { return size == other.size && mtime == other.mtime && identity == other.identity && directory == other.directory; }
 };
 #ifdef _WIN32
 struct Reader {
@@ -38,10 +39,12 @@ struct Reader {
 };
 bool snapshot(HANDLE file, Snapshot& result) {
   BY_HANDLE_FILE_INFORMATION information{};
-  if (GetFileType(file) != FILE_TYPE_DISK || !GetFileInformationByHandle(file, &information) ||
-      (information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) return false;
+  if (GetFileType(file) != FILE_TYPE_DISK || !GetFileInformationByHandle(file, &information)) return false;
+  result.directory = (information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
   result.size = (uint64_t(information.nFileSizeHigh) << 32) | information.nFileSizeLow;
   result.mtime = std::to_string((uint64_t(information.ftLastWriteTime.dwHighDateTime) << 32) | information.ftLastWriteTime.dwLowDateTime);
+  FILE_BASIC_INFO basic{};
+  if (GetFileInformationByHandleEx(file, FileBasicInfo, &basic, sizeof(basic))) result.mtime += ":" + std::to_string(basic.ChangeTime.QuadPart);
   result.identity = std::to_string(information.dwVolumeSerialNumber) + ":" + std::to_string(information.nFileIndexHigh) + ":" + std::to_string(information.nFileIndexLow);
   return true;
 }
@@ -52,7 +55,8 @@ struct Reader {
 };
 bool snapshot(int file, Snapshot& result) {
   struct stat info{};
-  if (fstat(file, &info) != 0 || !S_ISREG(info.st_mode) || info.st_size < 0) return false;
+  if (fstat(file, &info) != 0 || (!S_ISREG(info.st_mode) && !S_ISDIR(info.st_mode)) || info.st_size < 0) return false;
+  result.directory = S_ISDIR(info.st_mode);
   result.size = static_cast<uint64_t>(info.st_size);
 #ifdef __APPLE__
   result.mtime = std::to_string(info.st_mtimespec.tv_sec) + ":" + std::to_string(info.st_mtimespec.tv_nsec) + ":" +
@@ -84,7 +88,7 @@ std::string shared_read_range_json(const char* input, const char* offset_text, i
     // FILE_SHARE_DELETE is essential: CRT fopen("rb") permits ordinary writes
     // but can still make a writer's rename/replace/delete fail with error 32.
     reader.value = CreateFileW(path.c_str(), GENERIC_READ,
-      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
     if (reader.value == INVALID_HANDLE_VALUE) {
       const DWORD error = GetLastError();
       return failure(error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND ? "NOT_FOUND" : "OPEN_FAILED", error);
@@ -95,6 +99,7 @@ std::string shared_read_range_json(const char* input, const char* offset_text, i
 #endif
     Snapshot before, after;
     if (!snapshot(reader.value, before)) return failure("STAT_FAILED");
+    if (before.directory && count > 0) return failure("NOT_FILE");
 #ifdef REAWEB_SHARED_READ_TEST_HOOK
     shared_read_test_hook();
 #endif
@@ -125,7 +130,7 @@ std::string shared_read_range_json(const char* input, const char* offset_text, i
       hex[index * 2] = digits[value >> 4]; hex[index * 2 + 1] = digits[value & 15];
     }
     return "{\"protocol\":1,\"ok\":true,\"dataHex\":\"" + hex + "\",\"size\":\"" + std::to_string(before.size) +
-      "\",\"mtime\":\"" + before.mtime + "\",\"fileId\":\"" + before.identity + "\"}";
+      "\",\"mtime\":\"" + before.mtime + "\",\"fileId\":\"" + before.identity + "\",\"directory\":" + (before.directory ? "true}" : "false}");
   } catch (...) { return failure("READ_FAILED"); }
 }
 }

@@ -413,7 +413,7 @@ entry.restype = C.c_int
 info = Info(0x20E, owner_window, register, get_func)
 assert entry(None, C.byref(info)) == 1
 try:
-    assert len(registrations) == 85 + (sys.platform in ('darwin', 'win32')), list(registrations)
+    assert len(registrations) == 88 + (sys.platform in ('darwin', 'win32')), list(registrations)
     assert (b'accelerator' in registrations) == (sys.platform in ('darwin', 'win32'))
     assert b'prefpage' in registrations
     assert C.string_at(registrations[b'APIdef_ReaWeb_SetShortcutRouting']) == b'bool'
@@ -437,6 +437,22 @@ try:
     is_open = C.CFUNCTYPE(C.c_bool, C.c_int)(registrations[b'API_ReaWeb_IsOpen'])
     close_window = C.CFUNCTYPE(C.c_bool, C.c_int)(registrations[b'API_ReaWeb_Close'])
     get_error = C.CFUNCTYPE(C.c_char_p)(registrations[b'API_ReaWeb_GetLastError'])
+    shared_read = C.CFUNCTYPE(C.c_char_p, C.c_char_p, C.c_char_p, C.c_int)(registrations[b'API_ReaWeb_ReadSharedRange'])
+    shared_vararg = C.CFUNCTYPE(C.c_char_p, C.POINTER(C.c_void_p), C.c_int)(registrations[b'APIvararg_ReaWeb_ReadSharedRange'])
+    shared_definition = registrations[b'APIdef_ReaWeb_ReadSharedRange']
+    assert C.string_at(shared_definition) == b'const char*'
+    assert C.string_at(shared_definition + len(b'const char*') + 1) == b'const char*,const char*,int'
+    shared_fixture = root / 'shared-source-音效.bin'
+    shared_bytes = bytes(range(256)) * 300
+    shared_fixture.write_bytes(shared_bytes)
+    shared_path = C.create_string_buffer(str(shared_fixture).encode('utf-8'))
+    shared_offset = C.create_string_buffer(b'3')
+    shared_response = json.loads(shared_read(shared_path, shared_offset, 65536))
+    assert shared_response['ok'] and bytes.fromhex(shared_response['dataHex']) == shared_bytes[3:65539]
+    shared_args = (C.c_void_p * 3)(C.addressof(shared_path), C.addressof(shared_offset), 65536)
+    assert json.loads(shared_vararg(shared_args, 3)) == shared_response
+    assert json.loads(shared_vararg(None, 0))['code'] == 'INVALID_ARGUMENT'
+    assert shared_fixture.read_bytes() == shared_bytes
     open_ex = C.CFUNCTYPE(C.c_int, C.c_char_p, C.c_char_p)(registrations[b'API_ReaWeb_OpenEx'])
     show_window = C.CFUNCTYPE(C.c_bool, C.c_int)(registrations[b'API_ReaWeb_Show'])
     for options in (None, b'', b'null', b'[]', b'{', b'{"hidden":1}', b'{"unknown":true}', b'{"id":false}'):

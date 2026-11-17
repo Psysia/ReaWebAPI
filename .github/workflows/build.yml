@@ -66,7 +66,19 @@ jobs:
         env:
           PYTHONUTF8: '1'
       - name: Stage installation
+        if: success()
         run: cmake --install build --config Release --prefix stage
+      - name: Upload shared-read native test evidence
+        uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: ReaWebAPI-shared-readonly-tests-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            build/tests/Release/shared_readonly_driver.exe
+            build/Testing/Temporary/LastTest.log
+            tests/shared_readonly_contract.py
+          if-no-files-found: error
+          retention-days: 30
       - name: Ad-hoc sign macOS extension
         if: matrix.platform == 'macos'
         run: codesign --force --sign - stage/UserPlugins/reaper_reawebapi-${{ matrix.arch }}.dylib
