@@ -7,6 +7,13 @@ if(WIN32)
 endif()
 
 add_executable(diagnostics_tests diagnostics_tests.cpp)
+add_executable(shared_readonly_driver shared_readonly_driver.cpp "${PROJECT_SOURCE_DIR}/src/core/shared_readonly.cpp")
+target_include_directories(shared_readonly_driver PRIVATE "${PROJECT_SOURCE_DIR}/src")
+target_compile_definitions(shared_readonly_driver PRIVATE REAWEB_SHARED_READ_TEST_HOOK)
+target_link_libraries(shared_readonly_driver PRIVATE Threads::Threads)
+add_test(NAME shared_readonly COMMAND "${Python3_EXECUTABLE}" -X utf8
+  "${CMAKE_CURRENT_SOURCE_DIR}/shared_readonly_contract.py" "$<TARGET_FILE:shared_readonly_driver>")
+set_tests_properties(shared_readonly PROPERTIES TIMEOUT 60)
 target_link_libraries(diagnostics_tests PRIVATE reaweb_core)
 add_test(NAME diagnostics COMMAND diagnostics_tests)
 add_executable(core_tests core_tests.cpp)

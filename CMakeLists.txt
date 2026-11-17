@@ -3,7 +3,7 @@ if(CMAKE_HOST_APPLE AND NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
   set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version")
 endif()
 project(ReaWebAPI VERSION 0.3.9.30 LANGUAGES C CXX)
-set(REAWEB_PRS_PATCH 2)
+set(REAWEB_PRS_PATCH 3)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -91,6 +91,7 @@ endif()
 find_package(Threads REQUIRED)
 add_library(reaweb_core STATIC
   src/core/core.cpp
+  src/core/shared_readonly.cpp
   src/core/reaper_api.cpp
   src/core/batch.cpp
   src/core/native.cpp

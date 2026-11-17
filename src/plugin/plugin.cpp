@@ -2,6 +2,7 @@
 #include "plugin/preferences.hpp"
 #include "runtime/runtime.hpp"
 #include "core/file_time.hpp"
+#include "core/shared_readonly.hpp"
 #include <cstring>
 #include <atomic>
 #include <memory>
@@ -112,6 +113,11 @@ const char* ReaWeb_GetDiagnostics(int id) {
   return guarded([&]() -> const char* { value = runtime->diagnostics(id).dump(); return value.c_str(); }, "{}");
 }
 const char* ReaWeb_GetLastError() { return last_error.c_str(); }
+const char* ReaWeb_ReadSharedRange(const char* path, const char* offset, int count) {
+  static thread_local std::string value;
+  value = shared_read_range_json(path, offset, count);
+  return value.c_str();
+}
 int ReaWeb_RegisterService(const char* name, const ReaWeb_ServiceCallbacks* callbacks, uint64_t* handle) {
   try { return runtime ? runtime->services().add(name, callbacks, handle) : REAWEB_EXTENSION_UNLOADED; }
   catch (...) { return REAWEB_SERVICE_ERROR; }
@@ -183,6 +189,12 @@ template<bool (*Fn)(int, const char*)> void* mouse_vararg(void** args, int count
     count >= 2 ? static_cast<const char*>(args[1]) : nullptr)));
 }
 void* error_vararg(void**, int) { return const_cast<char*>(ReaWeb_GetLastError()); }
+void* shared_read_vararg(void** args, int count) {
+  return const_cast<char*>(ReaWeb_ReadSharedRange(
+    count >= 1 ? static_cast<const char*>(args[0]) : nullptr,
+    count >= 2 ? static_cast<const char*>(args[1]) : nullptr,
+    count >= 3 ? static_cast<int>(reinterpret_cast<intptr_t>(args[2])) : -1));
+}
 void* send_vararg(void** args, int count) {
   return reinterpret_cast<void*>(static_cast<intptr_t>(ReaWeb_Send(
     count >= 1 ? static_cast<int>(reinterpret_cast<intptr_t>(args[0])) : 0,
@@ -543,6 +555,8 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(REAPER_PLUGIN_H
       "bool\0int\0windowId\0Request showing DevTools. Returns false when native Inspector controls are unavailable.\0");
     add_api("ReaWeb_GetLastError", reinterpret_cast<void*>(ReaWeb_GetLastError), reinterpret_cast<void*>(error_vararg),
       "const char*\0\0\0Return the last runtime error. Async initialization errors are also printed to the REAPER console.\0");
+    add_api("ReaWeb_ReadSharedRange", reinterpret_cast<void*>(ReaWeb_ReadSharedRange), reinterpret_cast<void*>(shared_read_vararg),
+      "const char*\0const char*,const char*,int\0path,offsetDecimal,count\0Read a source file without denying write/delete sharing. Absolute UTF-8 path; decimal byte offset; count 0..65536 (0=stat). Returns versioned ASCII JSON with hex bytes, exact size/mtime/fileId, or an error. No SQL, write handles, recovery, locks or source changes.\0");
     add_api("ReaWeb_SetDocked", reinterpret_cast<void*>(ReaWeb_SetDocked), reinterpret_cast<void*>(dock_vararg),
       "bool\0int,bool\0windowId,docked\0Dock or float the window. Returns the resulting docked state.\0");
     add_api("ReaWeb_IsDocked", reinterpret_cast<void*>(ReaWeb_IsDocked), reinterpret_cast<void*>(id_vararg<ReaWeb_IsDocked>),
