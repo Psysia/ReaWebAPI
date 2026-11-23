@@ -6,7 +6,6 @@
   const serviceSubscriptions = new Map();
   const streamConsumers = new Set();
   const latest = new Map();
-  const batchReferences = new WeakMap();
   // Event names are NOT listed here on purpose. The native host owns the list and
   // advertises it in the handshake; a second hardcoded copy in this file drifts
   // silently and surfaces as "UNKNOWN_EVENT" in the page at runtime. Ask the host.
@@ -34,6 +33,7 @@
   const browserBasics = () => {
     const result = { secureContext: window.isSecureContext === true,
       crossOriginIsolated: window.crossOriginIsolated === true, sharedArrayBuffer: false, wasmSharedMemory: false };
+    if (!result.crossOriginIsolated) return result;
     try {
       const view = new Int32Array(new window.SharedArrayBuffer(4));
       Atomics.store(view, 0, 7); result.sharedArrayBuffer = Atomics.load(view, 0) === 7;
@@ -148,14 +148,7 @@
     return btoa(binary);
   };
   const encodeValue = (_, value) => {
-    if (batchReferences.has(value))
-      throw failure('INVALID_ARGUMENT', 'Batch references can only be used inside their builder');
     if (value instanceof Uint8Array) return { __reawebBytes: byteString(value) };
-    if (value instanceof Float64Array) {
-      const data = new Uint8Array(value.length * 8), view = new DataView(data.buffer);
-      for (let i = 0; i < value.length; ++i) view.setFloat64(i * 8, value[i], true);
-      return { __reawebFloat64: byteString(data) };
-    }
     if (typeof value === 'number' && !Number.isFinite(value))
       throw failure('INVALID_ARGUMENT', 'NaN and Infinity are not native API arguments');
     return value;
@@ -226,7 +219,7 @@
     } else item.resolve(item.service ? message.result : decodeValue(message.result));
   };
   Object.defineProperty(window, '__reawebReceive', { value: receive });
-  const send = (method, args) => new Promise((resolve, reject) => {
+  const send = (method, args, project = projectEpoch) => new Promise((resolve, reject) => {
     if (closed) return reject(failure('WINDOW_CLOSED', 'The WebView document was closed'));
     if (!post) return reject(failure('NO_RUNTIME', 'Open this page with ReaWebAPI inside REAPER'));
     if (pending.size >= 256) { if (diagnosticEnabled) ++health.queueRejected; return reject(failure('QUEUE_LIMIT', 'Too many pending API calls')); }
@@ -240,7 +233,7 @@
     if (diagnosticEnabled) { item.method = method; item.at = Date.now(); }
     pending.set(id, item);
     try {
-      const message = JSON.stringify({ id, document: documentId, project: projectEpoch, expiresAt: Date.now() + 25000, method, args,
+      const message = JSON.stringify({ id, document: documentId, project, expiresAt: Date.now() + 25000, method, args,
         ...(method === '__reawebHello' ? { browser: initialBrowser } : {}) }, encodeValue);
       if (new TextEncoder().encode(message).length > 64 * 1024 * 1024) throw failure('MESSAGE_LIMIT', 'Bridge message exceeds 64 MiB');
       post(message);
@@ -253,19 +246,19 @@
   });
   const ready = send('__reawebHello', [1]).then(capabilities => {
     if (capabilities?.protocol !== 1) throw failure('PROTOCOL_MISMATCH', 'Unsupported native bridge protocol');
-    if (!Array.isArray(capabilities.methods) || reawebApiMethods.some(name => !capabilities.methods.includes(name)))
-      throw failure('SCHEMA_MISMATCH', 'JavaScript API definitions do not match the native host');
+    if (!Array.isArray(capabilities.methods))
+      throw failure('SCHEMA_MISMATCH', 'Expected a native method table');
     projectEpoch = capabilities.projectEpoch;
     return Object.freeze(capabilities);
   });
   // Loading a page that does not use the API should not create an unhandled rejection.
   ready.catch(() => {});
   if (isolationRequired) ready.then(probeBrowser).catch(() => {});
-  const call = (method, args) => {
+  const call = (method, args, project) => {
     if (closed) return Promise.reject(failure('WINDOW_CLOSED', 'The WebView document was closed'));
     if (waiting >= 256) { if (diagnosticEnabled) ++health.queueRejected; return Promise.reject(failure('QUEUE_LIMIT', 'Too many pending API calls')); }
     ++waiting;
-    return ready.then(() => send(method, args)).finally(() => --waiting);
+    return ready.then(() => send(method, args, project)).finally(() => --waiting);
   };
   let stopTitle = () => {};
   const startTitle = () => {
@@ -388,25 +381,7 @@
     update();
   };
   const api = Object.create(null);
-  // Only the official REAPER mirror is exposed at the root. ReaWeb_* strings
-  // below are private transport commands, never public JavaScript aliases.
   const host = name => (...args) => call(name, args);
-  for (const name of reawebApiMethods) api[name] = (...args) => call(name, args).then(result => {
-    if (result?.__reawebCall === true) {
-      for (const update of result.arrays) {
-        const target = args[update.index];
-        const data = decodeValue(update.values);
-        const binary = data instanceof Uint8Array;
-        const length = binary ? data.byteLength / 8 : data.length;
-        if (!target || !Number.isInteger(length) || target.length !== length)
-          throw failure('ARRAY_CHANGED', 'Keep sample buffers the same size until the API call resolves');
-        const view = binary ? new DataView(data.buffer, data.byteOffset, data.byteLength) : null;
-        for (let i = 0; i < length; ++i) target[i] = view ? view.getFloat64(i * 8, true) : data[i];
-      }
-      result = decodeValue(result.value);
-    }
-    return reawebApiVoidMethods.includes(name) ? undefined : result;
-  });
   const onEvent = async (name, callback) => {
     await eventName(name);
     if (typeof callback !== 'function') throw failure('INVALID_ARGUMENT', 'Expected an event callback');
@@ -516,96 +491,33 @@
       catch (error) { if (!failed) throw error; }
     }
   };
-  const batch = async (input, ...options) => {
-    if (typeof input !== 'function') return call('ReaWeb_Batch', [input, ...options]);
-    const capabilities = await ready;
+  const setTrackValueLatest = async (track, key, value) => {
     if (closed) throw failure('WINDOW_CLOSED', 'The WebView document was closed');
-    if (!Array.isArray(capabilities.batchMethods))
-      throw failure('SCHEMA_MISMATCH', 'The native host does not advertise batch methods');
-    const allowed = new Set(capabilities.batchMethods.filter(name => reawebApiMethods.includes(name)));
-    const owner = {}, calls = [];
-    let active = true;
-    const invalid = message => { throw failure('INVALID_ARGUMENT', message); };
-    const reference = (index, tupleSize = 0, path) => {
-      const value = tupleSize ? Array.from({ length: tupleSize }, (_, i) => reference(index, 0, [i])) : {};
-      batchReferences.set(value, { owner, wire: path ? { $ref: index, path } : { $ref: index } });
-      Object.defineProperties(value, {
-        then: { get: () => invalid('Batch references cannot be awaited; use a synchronous callback') },
-        [Symbol.toPrimitive]: { value: () => invalid('Batch references are not resolved values') }
-      });
-      return Object.freeze(value);
-    };
-    const ownedReference = value => {
-      const ref = batchReferences.get(value);
-      if (ref && ref.owner !== owner) invalid('Batch references cannot cross builders');
-      return ref;
-    };
-    // Snapshot literals and return structures before dispatch. Only top-level
-    // native arguments support references in the existing batch protocol.
-    const visit = (value, onReference, ancestors = new Set()) => {
-      const ref = ownedReference(value);
-      if (ref) return onReference(ref.wire, value);
-      if (value === null || value === undefined || ['string', 'boolean'].includes(typeof value)) return value;
-      if (typeof value === 'number' && Number.isFinite(value)) return value;
-      if (typeof value !== 'object') return invalid('Expected a batch literal, array, object or reference');
-      if (typeof value.then === 'function') {
-        Promise.resolve(value).catch(() => {});
-        invalid('Batch callbacks and return values must be synchronous');
-      }
-      if (value instanceof Uint8Array) return value.slice();
-      const prototype = Object.getPrototypeOf(value);
-      if (!Array.isArray(value) && prototype !== null && Object.getPrototypeOf(prototype) !== null)
-        invalid('Batch structures must contain plain objects or arrays');
-      if (ancestors.has(value)) invalid('Batch structures cannot contain cycles');
-      ancestors.add(value);
-      try {
-        return Array.isArray(value) ? value.map(child => visit(child, onReference, ancestors))
-          : Object.fromEntries(Object.entries(value).map(([key, child]) => [key, visit(child, onReference, ancestors)]));
-      } finally { ancestors.delete(value); }
-    };
-    const methods = Object.create(null);
-    for (const name of allowed) methods[name] = (...args) => {
-      if (!active) invalid('The batch builder callback has finished');
-      if (calls.length >= 128) invalid('A batch must contain 1 to 128 calls');
-      const encoded = args.map(value => {
-        const ref = ownedReference(value);
-        if (ref) return ref.wire;
-        const literal = visit(value, () => invalid('Batch argument references must be top-level'));
-        if (literal && typeof literal === 'object' && Object.hasOwn(literal, '$ref'))
-          invalid('Use builder references instead of literal $ref objects');
-        return literal;
-      });
-      const index = calls.length;
-      calls.push({ method: name, args: encoded });
-      return reference(index, reawebApiTupleSizes[name] || 0);
-    };
-    const builder = new Proxy(Object.freeze(methods), {
-      get: (target, name) => {
-        if (Object.hasOwn(target, name)) return target[name];
-        return invalid(`This API is not batchable: ${String(name)}`);
-      }
-    });
-    let returned;
-    try { returned = input(builder); }
-    finally { active = false; }
-    const projection = visit(returned, (_, value) => value);
-    if (!calls.length) invalid('A batch must contain 1 to 128 calls');
-    const results = await call('ReaWeb_Batch', [calls, ...options]);
-    if (returned === undefined) return results;
-    return visit(projection, wire => {
-      let value = results[wire.$ref];
-      for (const key of wire.path || []) value = value[key];
-      return value;
-    });
-  };
-  const setTrackValueLatest = (track, key, value) => new Promise((resolve, reject) => {
-    if (closed) return reject(failure('WINDOW_CLOSED', 'The WebView document was closed'));
-    if (!track || track.type !== 'MediaTrack' || typeof track.id !== 'string' ||
+    if (typeof track?.guid !== 'string' || !track.guid.length || !Number.isSafeInteger(track.projectEpoch) || track.projectEpoch < 1 ||
         !['D_VOL', 'D_PAN', 'B_MUTE', 'I_SOLO'].includes(key) || !Number.isFinite(value))
-      return reject(failure('INVALID_ARGUMENT', 'Expected a track handle, supported key and finite value'));
-    const token = JSON.stringify([track.id, key]);
+      throw failure('INVALID_ARGUMENT', 'Expected a project track reference, supported key and finite value');
+    const project = track.projectEpoch;
+    const target = { projectEpoch: project, guid: track.guid };
+    if (Number.isInteger(track.index)) target.index = track.index;
+    return queueLatest(JSON.stringify([project, track.guid, key]), 'ReaWeb_SetTrackValue', [target, key, value], project);
+  };
+  const setFxParameterLatest = async (ref, index, normalized) => {
+    if (closed) throw failure('WINDOW_CLOSED', 'The WebView document was closed');
+    if (!Number.isSafeInteger(ref?.projectEpoch) || ref.projectEpoch < 1 ||
+        typeof ref.track !== 'string' || typeof ref.fx !== 'string' ||
+        !['main','input','monitoring','take'].includes(ref.chain) ||
+        (ref.chain === 'take' ? typeof ref.take !== 'string' : ref.take !== undefined) ||
+        !Number.isSafeInteger(index) || index < 0 || index > 2147483647 ||
+        !Number.isFinite(normalized) || normalized < 0 || normalized > 1)
+      throw failure('INVALID_ARGUMENT', 'Expected an FX reference, parameter index and normalized value in [0,1]');
+    const target = {projectEpoch:ref.projectEpoch, track:ref.track, fx:ref.fx, chain:ref.chain};
+    if (ref.chain === 'take') target.take = ref.take;
+    const token = JSON.stringify([target.projectEpoch, target.track, target.chain, target.take, target.fx, index]);
+    return queueLatest(token, 'ReaWeb_SetFxParameter', [target, index, normalized], target.projectEpoch);
+  };
+  const queueLatest = (token, method, args, project) => new Promise((resolve, reject) => {
     let entry = latest.get(token);
-    const request = { track, key, value, resolve, reject };
+    const request = { args, project, resolve, reject };
     if (entry) {
       if (entry.next) entry.next.resolve({ applied: false, superseded: true });
       entry.next = request;
@@ -618,7 +530,7 @@
       let current = first;
       while (current) {
         try {
-          const applied = await call('SetMediaTrackInfo_Value', [current.track, current.key, current.value]);
+          const applied = await call(method, current.args, current.project);
           current.resolve({ applied, superseded: false });
         } catch (error) { current.reject(error); }
         current = entry.next;
@@ -716,7 +628,7 @@
         socket.onclose = event => {
           if (diagnosticEnabled && active && event.code !== 1000) ++health.streamCloses;
           clearTimeout(timeout);
-          const code = ['STREAM_CLOSED', 'EXTENSION_UNLOADED', 'TIMEOUT', 'UNSUPPORTED_FORMAT', 'NATIVE_ERROR'].includes(event.reason) ? event.reason : 'TRANSPORT_ERROR';
+          const code = ['STREAM_CLOSED', 'EXTENSION_UNLOADED', 'TIMEOUT', 'UNSUPPORTED_FORMAT', 'NATIVE_ERROR', 'STALE_HANDLE', 'PROJECT_CHANGED'].includes(event.reason) ? event.reason : 'TRANSPORT_ERROR';
           finish(code, event.reason || 'Native stream connection closed');
           if (!connected) reject(status || failure(code, code));
         };
@@ -990,6 +902,50 @@
   // Realtime sources use ordinary v1 binary streams. JSFX v2 timing and its
   // instance permissions remain separate; source decoders are explicitly versioned.
   const realtimeDecoders = {
+    'fx-parameters.v1': (packet, descriptor) => {
+      const bytes = packet.bytes;
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      const invalid = () => failure('UNSUPPORTED_FORMAT', 'Invalid FX parameter snapshot');
+      if (bytes.byteLength < 40 || view.getUint32(0, true) !== 0x31305046) throw invalid();
+      const count = view.getUint32(4, true);
+      if (!count || count > 32 || count !== descriptor.parameters.length || bytes.byteLength !== 40 + count * 8) throw invalid();
+      const sampledAt = view.getFloat64(8, true), sampleDurationMs = view.getFloat64(16, true);
+      if (!Number.isFinite(sampledAt) || !Number.isFinite(sampleDurationMs) || sampleDurationMs < 0) throw invalid();
+      const values = descriptor.parameters.map((index, i) => {
+        const normalized = view.getFloat64(40 + i * 8, true);
+        if (!Number.isFinite(normalized) || normalized < 0 || normalized > 1) throw invalid();
+        return Object.freeze({ index, normalized });
+      });
+      return Object.freeze({ source:'fx-parameters', track:descriptor.track, fx:descriptor.fx, values:Object.freeze(values),
+        sampledAt, sampleDurationMs, projectEpoch:view.getBigUint64(24,true), sourceSequence:view.getBigUint64(32,true),
+        sequence:packet.sequence, producerDropped:packet.producerDropped });
+    },
+    'track-controls.v1': (packet, descriptor) => {
+      const { bytes } = packet;
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      const invalid = () => failure('UNSUPPORTED_FORMAT', 'Invalid track-controls snapshot');
+      if (bytes.byteLength < 40 || view.getUint32(0, true) !== 0x31304354) throw invalid();
+      const mask = view.getUint8(4), count = view.getUint8(5);
+      const keys = ['volume', 'pan', 'mute', 'solo'].filter((_, i) => mask & (1 << i));
+      if (!mask || mask > 15 || mask !== descriptor.mask || !count || count > 16 ||
+          count !== descriptor.tracks.length || bytes.byteLength !== 40 + count * keys.length * 8) throw invalid();
+      const sampledAt = view.getFloat64(8, true), sampleDurationMs = view.getFloat64(16, true);
+      if (!Number.isFinite(sampledAt) || !Number.isFinite(sampleDurationMs) || sampleDurationMs < 0) throw invalid();
+      let offset = 40;
+      const tracks = descriptor.tracks.map(guid => {
+        const track = { guid };
+        for (const key of keys) {
+          const value = view.getFloat64(offset, true);
+          if (!Number.isFinite(value) || (key === 'solo' && !Number.isInteger(value))) throw invalid();
+          track[key] = key === 'mute' ? !!value : value;
+          offset += 8;
+        }
+        return Object.freeze(track);
+      });
+      return Object.freeze({ source: 'track-controls', tracks: Object.freeze(tracks), sampledAt, sampleDurationMs,
+        projectEpoch: view.getBigUint64(24, true), sourceSequence: view.getBigUint64(32, true),
+        sequence: packet.sequence, producerDropped: packet.producerDropped });
+    },
     'transport.v1': packet => {
       const bytes = packet.bytes;
       if (bytes.byteLength !== 64) throw failure('UNSUPPORTED_FORMAT', 'Invalid transport snapshot size');
@@ -1025,19 +981,34 @@
         producerDropped: packet.producerDropped });
     }
   };
+  const fxReceipts = new Map();
   api.realtime = Object.freeze({
     getCapabilities: () => call('ReaWeb_RealtimeCapabilities', []),
-    getDiagnostics: () => call('ReaWeb_RealtimeDiagnostics', []),
+    getDiagnostics: async () => {
+      const result = await call('ReaWeb_RealtimeDiagnostics', []);
+      for (const row of result.subscriptions) {
+        const stats = fxReceipts.get(row.id);
+        if (stats) Object.assign(row, { received:stats.count, receiveHz:stats.last > stats.first ?
+          (stats.count - 1) * 1000 / (stats.last - stats.first) : 0, sequenceGaps:stats.gaps });
+      }
+      return result;
+    },
     subscribe: async (source, options = {}) => {
       if (typeof source !== 'string' || !/^[a-z][a-z0-9-]{0,63}$/.test(source) ||
           !options || typeof options !== 'object' || Array.isArray(options) ||
-          Object.keys(options).some(key => !['updateRate', 'onData', 'onError', 'onClose'].includes(key)) ||
+          Object.keys(options).some(key => !['updateRate', 'onData', 'onError', 'onClose'].includes(key) &&
+            !(source === 'track-controls' && ['tracks', 'properties'].includes(key)) &&
+            !(source === 'fx-parameters' && ['track', 'fx', 'parameters', 'chain', 'take'].includes(key))) ||
           ['onData', 'onError', 'onClose'].some(key => options[key] !== undefined && typeof options[key] !== 'function') ||
           (options.updateRate !== undefined && (!Number.isFinite(options.updateRate) || options.updateRate < 1 || options.updateRate > 120)))
         throw failure('INVALID_ARGUMENT', 'Expected source, updateRate (1..120) and optional callbacks');
-      const descriptor = await call('ReaWeb_RealtimeSubscribe', [source, options.updateRate === undefined ? {} : { updateRate: options.updateRate }]);
+      const nativeOptions = {};
+      for (const key of ['updateRate', 'tracks', 'properties', 'track', 'fx', 'parameters', 'chain', 'take'])
+        if (options[key] !== undefined) nativeOptions[key] = options[key];
+      const descriptor = await call('ReaWeb_RealtimeSubscribe', [source, nativeOptions]);
       let stream, current = null, releasing = null, closing = null, error = null;
       const release = () => {
+        fxReceipts.delete(descriptor.id);
         if (!releasing) releasing = closed ? Promise.resolve() : call('ReaWeb_RealtimeUnsubscribe', [descriptor.id]);
         return releasing;
       };
@@ -1045,10 +1016,22 @@
         const decode = realtimeDecoders[descriptor.schema];
         if (!decode) throw failure('UNSUPPORTED_FORMAT', 'Unknown realtime source schema');
         stream = await openStream(descriptor.stream);
+        const stats = source === 'fx-parameters' ? {count:0, first:0, last:0, gaps:0} : null;
+        if (stats) fxReceipts.set(descriptor.id, stats);
         const receive = () => {
           const packet = stream.latest();
           if (!packet || current?.sequence === packet.sequence) return;
-          try { current = decode(packet); if (options.onData) notify(options.onData, current); }
+          try {
+            const previous = current?.sequence;
+            current = decode(packet, descriptor);
+            if (stats) {
+              stats.last = performance.now();
+              if (!stats.count++) stats.first = stats.last;
+              if (previous !== undefined && current.sequence > previous + 1n)
+                stats.gaps += Number(current.sequence - previous - 1n);
+            }
+            if (options.onData) notify(options.onData, current);
+          }
           catch (reason) { error = reason; if (options.onError) notify(options.onError, reason); void subscription.close().catch(() => {}); }
         };
         const subscription = Object.freeze({
@@ -1065,6 +1048,10 @@
         stream.on('error', reason => { error = reason; if (options.onError) notify(options.onError, reason); });
         stream.on('close', reason => {
           current = null;
+          if ((source === 'track-controls' || source === 'fx-parameters') && ['STALE_HANDLE', 'PROJECT_CHANGED', 'NATIVE_ERROR'].includes(reason?.code)) {
+            error = reason;
+            if (options.onError) notify(options.onError, reason);
+          }
           void release().catch(reason => { if (options.onError) notify(options.onError, reason); });
           if (options.onClose) notify(options.onClose, reason);
         });
@@ -1103,8 +1090,6 @@
       return dispose;
     } catch (error) { await dispose(); throw error; }
   };
-  // Runtime namespaces share the existing bridge; the 730 REAPER methods retain
-  // their names, argument order, typed handles and asynchronous results.
   api.events = Object.freeze({ on: onEvent, off: offEvent });
   api.host = Object.freeze({ service, send: async message => {
     let text;
@@ -1129,7 +1114,8 @@
     getPosition: async () => { const b = await call('ReaWeb_GetBounds', []); return { x: b.x, y: b.y, mode: b.mode, units: b.units }; },
     setPosition: (x, y) => call('ReaWeb_SetBounds', [{ x, y }]),
     show: () => call('ReaWeb_SetVisible', [true]), hide: () => call('ReaWeb_SetVisible', [false]),
-    getState: host('ReaWeb_GetWindowState'), setTitle: host('ReaWeb_SetTitle'), setIcon: host('ReaWeb_SetIcon'),
+    getState: host('ReaWeb_GetWindowState'), getMaxRefreshRate: host('ReaWeb_GetMaxRefreshRate'),
+    setTitle: host('ReaWeb_SetTitle'), setIcon: host('ReaWeb_SetIcon'),
     setIconVisible: host('ReaWeb_SetIconVisible'), focus: host('ReaWeb_Focus'),
     setFrameless: host('ReaWeb_SetFrameless'), setCornerRadius: host('ReaWeb_SetCornerRadius'),
     setDocked: host('ReaWeb_SetDocked'), isDocked: host('ReaWeb_IsDocked'),
@@ -1195,7 +1181,7 @@
     getPlatform: host('ReaWeb_GetPlatform'), getArchitecture: host('ReaWeb_GetArchitecture'), revealInFileManager: host('ReaWeb_RevealPath')
   });
   api.transaction = Object.freeze({
-    batch, beginUndo: host('ReaWeb_BeginUndo'), endUndo: host('ReaWeb_EndUndo'), withUndo
+    beginUndo: host('ReaWeb_BeginUndo'), endUndo: host('ReaWeb_EndUndo'), withUndo
   });
   api.dragDrop = Object.freeze({
     startFiles: host('ReaWeb_DragFiles'), startText: host('ReaWeb_DragText')
@@ -1236,8 +1222,7 @@
         throw failure('INVALID_ARGUMENT', 'Filters need a name and extensions such as wav, aiff or *');
       return filter.name + '|' + filter.extensions.map(value => value === '*' ? '*.*' : '*.' + value).join(';');
     }).join('|');
-    const [ok, path] = await api.GetUserFileName(mode, title, initialPath, extension);
-    return ok ? path : null;
+    return call('ReaWeb_FileDialog', [mode, title, initialPath, extension]);
   };
   api.dialog = Object.freeze({ openFile: options => dialog(1, options), saveFile: options => dialog(0, options), selectFolder: options => dialog(3, options) });
   const preview = values => {
@@ -1254,8 +1239,8 @@
     log: (...values) => log('info', values),
     warn: (...values) => log('warn', values), error: (...values) => log('error', values),
     inspect: value => log('debug', [value]), getLogs: () => call('ReaWeb_GetLogs', []),
-    getDiagnostics: async () => { await ready; await probeBrowser(); return call('ReaWeb_GetDiagnostics', []); }, openDevTools: host('ReaWeb_DevTools'),
-    setBufferSize: host('ReaWeb_SetBufferSize')
+    getDiagnostics: async () => { await ready; await probeBrowser(); return call('ReaWeb_GetDiagnostics', []); }, openDevTools: host('ReaWeb_DevTools')
+
   });
   window.addEventListener('error', event => {
     if (diagnosticEnabled) {
@@ -1305,7 +1290,12 @@
     },
     getFileInfo: path => call('ReaWeb_AudioFileInfo', [path]),
     getWaveform: (path, options = {}) => call('ReaWeb_AudioWaveform', [path, options]),
+    getSelectedTrackRef: host('ReaWeb_GetSelectedTrackRef'),
+    getTrackMix: host('ReaWeb_GetTrackMix'),
+    applyTrackGain: host('ReaWeb_ApplyTrackGain'),
+    controlTransport: host('ReaWeb_TransportControl'),
     getTrackMeter: track => call('ReaWeb_GetTrackMeter', [track]),
+    getFxRef: host('ReaWeb_GetFxRef'), setFxParameterLatest,
     setTrackValueLatest
   });
   const runCleanup = async event => {

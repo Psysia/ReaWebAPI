@@ -34,18 +34,30 @@ bool small_message(const Json& value, size_t& budget) {
 Runtime::Runtime(Host host, fs::path resource, std::function<void(const std::string&)> log, DockApi dock)
   : host_(std::move(host)), services_([this](auto handle, const auto& service, int window, const auto& name, Json data) {
       service_event(handle, service, window, name, std::move(data));
-    }), producers_(host_, streams_), video_(host_, streams_, {}, make_video_scheduler(), [this] { video_tick(); }), realtime_(host_, streams_), dock_(std::move(dock)), resource_(std::move(resource)), log_(std::move(log)), diagnostic_log_(resource_), main_thread_(std::this_thread::get_id()) {
+    }), producers_(host_, streams_), video_(host_, streams_, {}, make_video_scheduler(), [this] { video_tick(); }), realtime_(host_, streams_), fx_writer_(host_, TrackControls::Source::fxParameters), dock_(std::move(dock)), resource_(std::move(resource)), log_(std::move(log)), diagnostic_log_(resource_), main_thread_(std::this_thread::get_id()) {
   diagnostic_log_.event(Diagnostics::Level::Debug, Diagnostics::Scope::Runtime, "runtime.start.begin");
   project_ = host_.current_project();
   host_generation_ = host_.project_generation ? host_.project_generation() : 0;
   project_epoch_ = 1;
   register_native_monitors(monitors_, host_);
-  ReaWeb_ServiceCallbacks builtin{sizeof(ReaWeb_ServiceCallbacks), REAWEB_SERVICE_ABI, &services_,
-    [](void* context, uint64_t handle, uint64_t request, int, const char* method, const char*) -> int {
-      if (std::string(method) != "getInfo") return REAWEB_METHOD_NOT_FOUND;
+  ReaWeb_ServiceCallbacks builtin{sizeof(ReaWeb_ServiceCallbacks), REAWEB_SERVICE_ABI, this,
+    [](void* context, uint64_t handle, uint64_t request, int, const char* method, const char* payload) -> int {
+      auto& runtime = *static_cast<Runtime*>(context);
+      const std::string operation(method);
+      Json result;
+      if (operation == "getInfo") result = {{"version", REAWEB_VERSION}, {"serviceABI", REAWEB_SERVICE_ABI}};
+      else {
+        if (payload && std::string(payload) != "null") return REAWEB_INVALID_ARGUMENT;
+        if (operation == "getHostVersion") result = host_version(runtime.host_);
+        else if (operation == "getProjectSummary") result = project_summary(runtime.host_);
+        else if (operation == "getTransportSnapshot") {
+          if (!runtime.host_.event_snapshot) return REAWEB_SERVICE_ERROR;
+          result = runtime.host_.event_snapshot("transportchange");
+          if (!result.value("available", false)) return REAWEB_SERVICE_ERROR;
+        } else return REAWEB_METHOD_NOT_FOUND;
+      }
       if (!request) return REAWEB_OK;
-      return static_cast<ServiceRegistry*>(context)->complete(handle, request,
-        Json{{"version", REAWEB_VERSION}, {"serviceABI", REAWEB_SERVICE_ABI}}.dump().c_str(), REAWEB_OK, nullptr);
+      return runtime.services_.complete(handle, request, result.dump().c_str(), REAWEB_OK, nullptr);
     }, nullptr};
   uint64_t handle = 0;
   services_.add("runtime", &builtin, &handle);
@@ -169,6 +181,8 @@ Json Runtime::host_call(int id, const std::string& method, const Json& args) {
     presenter->layout(args[1]);
     return true;
   }
+  if (method == "ReaWeb_GetFxRef") return fx_writer_.getFxRef(args[0], project_epoch_);
+  if (method == "ReaWeb_SetFxParameter") return fx_writer_.setFxParameter(args[0], args[1], args[2], project_epoch_);
   if (method == "ReaWeb_RealtimeCapabilities") return realtime_.capabilities();
   if (method == "ReaWeb_RealtimeDiagnostics") return realtime_.diagnostics(id);
   if (method == "ReaWeb_RealtimeSubscribe") {
@@ -463,7 +477,8 @@ bool Runtime::start_async(Session& session, const Work& request) {
   const bool media = method == "ReaWeb_OpenMedia" || method == "ReaWeb_CloseMedia";
   const bool drag = method == "ReaWeb_DragFiles" || method == "ReaWeb_DragText";
   const bool binary_clipboard = method == "ReaWeb_ClipboardReadBinary" || method == "ReaWeb_ClipboardWriteBinary";
-  if (!media && !drag && !binary_clipboard && method != "ReaWeb_GetDisplays" && method != "ReaWeb_RevealPath" && method != "ReaWeb_ClipboardReadText" && method != "ReaWeb_ClipboardWriteText" && method != "ReaWeb_OpenExternal") return false;
+  const bool refresh_rate = method == "ReaWeb_GetMaxRefreshRate";
+  if (!media && !drag && !binary_clipboard && !refresh_rate && method != "ReaWeb_GetDisplays" && method != "ReaWeb_RevealPath" && method != "ReaWeb_ClipboardReadText" && method != "ReaWeb_ClipboardWriteText" && method != "ReaWeb_OpenExternal") return false;
   std::weak_ptr<Session> weak = sessions_.at(session.id);
   auto complete = [this, weak, request](Json result) mutable {
     auto s = weak.lock();
@@ -472,6 +487,10 @@ bool Runtime::start_async(Session& session, const Work& request) {
     response.update(result);
     reply(*s, std::move(request), std::move(response));
   };
+  if (refresh_rate) {
+    if (!args.empty()) throw Error("INVALID_ARGUMENT", "GetMaxRefreshRate takes no arguments");
+    session.window->max_refresh_rate(std::move(complete)); return true;
+  }
   if (media) {
     if (args.size() != 1 || !args[0].is_string()) throw Error("INVALID_ARGUMENT", "Expected one media path or URL");
     if (!session.app->resources) throw Error("HOST_UNAVAILABLE", "Media URLs require a local App document");
@@ -872,17 +891,18 @@ void Runtime::dispatch_requests(Clock::time_point deadline) {
         response["result"]["projectEpoch"] = project_epoch_;
       } else {
         if (!s->ready || s->document != document) throw Error("DOCUMENT_STALE", "The bridge document is no longer active");
-        const bool project_call = method.rfind("ReaWeb", 0) != 0 || method == "ReaWeb_Batch" ||
-          method == "ReaWeb_BeginUndo" || method == "ReaWeb_GetTrackMeter";
+        const bool project_call = method == "ReaWeb_BeginUndo" || method == "ReaWeb_GetTrackMeter" ||
+          method == "ReaWeb_GetFxRef" || method == "ReaWeb_SetFxParameter" ||
+          method == "ReaWeb_SetTrackValue" || method == "ReaWeb_GetSelectedTrackRef" || method == "ReaWeb_FileDialog" ||
+          method == "ReaWeb_GetTrackMix" || method == "ReaWeb_TransportControl" || method == "ReaWeb_ApplyTrackGain";
         if (project_call && (request.project != project_epoch_ || data.value("project", project_epoch_) != project_epoch_))
           throw Error("PROJECT_CHANGED", "The current project changed. Refresh the tool state before trying again.", {{"projectEpoch", project_epoch_}});
         // Deliver directly before entering a potentially modal native call.
         // Queuing this on the worker would defer delivery until the call returns.
         s->window->evaluate("window.__reawebReceive(" + Json{{"id", data["id"]}, {"document", document}, {"started", true}}.dump() + ");");
-        if (undo_owner_ && (method == "ReaWeb_Batch" ||
-            (project_call && undo_owner_ != s->id) || method.rfind("Undo_", 0) == 0 || method == "PreventUIRefresh"))
-          throw Error("UNDO_BUSY", "End the managed Undo gesture before batching or using another page");
-        if (undo_owner_ && project_call) s->bridge->validate_managed_call(method, data.at("args"));
+        if (undo_owner_ && project_call && undo_owner_ != s->id)
+          throw Error("UNDO_BUSY", "Another page owns the managed Undo gesture");
+        if (undo_owner_ && project_call) s->bridge->validate_managed_call(method);
         if (start_async(*s, request)) { ++s->processed; continue; }
         const bool diagnostic_call = diagnostic_log_.enabled(Diagnostics::Level::Debug, Diagnostics::Scope::Runtime, s->app->id);
         const auto call_started = diagnostic_call ? Clock::now() : Clock::time_point{};

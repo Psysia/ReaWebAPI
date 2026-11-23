@@ -1,8 +1,8 @@
 # Runtime API 完整清单 / Complete API inventory
 
-JavaScript Runtime 公开以下 **17 个命名空间、92 个方法和 1 个 Promise 属性**。Host Service 代理另提供 `invoke/send/on/off`。730 项 REAPER Mirror 保持原始根级名称、参数顺序、Promise 和返回值规则。
+JavaScript Runtime 公开以下 **17 个命名空间、103 个方法和 1 个 Promise 属性**。Host Service 代理另提供 `invoke/send/on/off`。
 
-The JavaScript Runtime exposes seventeen namespaces: 92 methods and one Promise property, plus `invoke/send/on/off` on named service proxies. The 730 REAPER Mirror functions keep their original root-level names and signatures. Exact types: [runtime-api.d.ts](../runtime/runtime-api.d.ts). Contracts: [中文](runtime-api.zh-CN.md) · [English](runtime-api.md) · [Native Services](native-services.md).
+The JavaScript Runtime exposes seventeen namespaces: 103 methods and one Promise property, plus `invoke/send/on/off` on named service proxies. Exact types: [runtime-api.d.ts](../runtime/runtime-api.d.ts). Contracts: [中文](runtime-api.zh-CN.md) · [English](runtime-api.md) · [Native Services](native-services.md).
 
 Lua bootstrap is separate: `reaper.ReaWeb_Open(path)` runs before the browser exists. Lua-only native entry points remain documented in [Host API](host-api.md#lua-entry-points). They are not JavaScript aliases. Native transport command names in `capabilities.methods` are diagnostic wire identifiers, not callable JavaScript property paths; use `capabilities.runtime.namespaces` and this inventory for the public SDK surface.
 
@@ -21,6 +21,14 @@ Lua 后端与 WebView UI 之间的消息。Text messages between a Lua backend a
 | `reaper.host.send(message)` | `Promise<boolean>` | Queue a string or JSON-serialized value for Lua `ReaWeb_Receive`. Receive Lua text through `events.on('message', callback)` |
 | `reaper.host.service(name)` | `ReaWebHostService` | Named native service with invoke, send, on and off |
 
+自带示例通过 `reaper.host.service('runtime').invoke(method)` 读取下列宿主信息。外部客户端使用 `service.invoke`，指定 `service: "runtime"` 和相同的方法名。这三个只读方法均省略 payload。
+
+| 方法 | 返回 |
+| --- | --- |
+| `getHostVersion` | REAPER 版本字符串 |
+| `getProjectSummary` | 当前工程的 `name`、`trackCount` 和 `playState` |
+| `getTransportSnapshot` | 一次采样的 `state`、`position`、`cursor` 和 `tempo`，位置单位为秒 |
+
 ## reaper.window
 
 窗口的创建、几何、停靠、可见性、焦点和键盘策略。Window creation and presentation; external OS links belong to system.
@@ -31,6 +39,7 @@ Lua 后端与 WebView UI 之间的消息。Text messages between a Lua backend a
 | `reaper.window.openDev(url)` | `Promise<number>` | 打开受信任的本机 HTTP 开发服务器 |
 | `reaper.window.getSize()` | `Promise<Size>` | 读取当前窗口外部尺寸及模式、单位 |
 | `reaper.window.setSize(width, height)` | `Promise<ReaWebBounds>` | 设置浮动窗口外部尺寸 |
+| `reaper.window.getMaxRefreshRate()` | `Promise<number \| null>` | 当前窗口所在屏幕在所有可用显示模式中的最高刷新率（Hz），未知时返回 `null` |
 | `reaper.window.getPosition()` | `Promise<Position>` | 读取当前窗口位置及模式、单位 |
 | `reaper.window.setPosition(x, y)` | `Promise<ReaWebBounds>` | 设置浮动窗口位置 |
 | `reaper.window.show()` | `Promise<ReaWebWindowState>` | 显示当前窗口 |
@@ -104,7 +113,6 @@ REAPER 工程、对象、播放及窗口状态通知。Host state notifications;
 | `reaper.debug.getLogs()` | `Promise<ReaWebLogEntry[]>` | 读取当前窗口最近日志 |
 | `reaper.debug.getDiagnostics()` | `Promise<ReaWebDiagnostics>` | 读取后端、状态、错误和队列诊断 |
 | `reaper.debug.openDevTools()` | `Promise<boolean>` | 请求显示 [DevTools](devtools.zh-CN.md)，macOS 原生控制不可用时返回 `DEVTOOLS_UNAVAILABLE` 错误 |
-| `reaper.debug.setBufferSize(bytes)` | `Promise<number>` | 设置当前文档固定原生输出缓冲区容量 |
 
 ## reaper.fs
 
@@ -127,13 +135,19 @@ REAPER 工程、对象、播放及窗口状态通知。Host state notifications;
 
 ## reaper.audio
 
-音频元数据、波形、轨道电平及连续混音控制。Host audio helpers, not a duplicate of the standard REAPER Mirror.
+音频元数据、波形、轨道电平及连续混音控制。Host audio helpers.
 
 | API | 返回 / Result | 用途 |
 | --- | --- | --- |
 | `reaper.audio.getFileInfo(path)` | `Promise<ReaWebAudioFileInfo>` | 读取音频元数据 |
 | `reaper.audio.getWaveform(path, options?)` | `Promise<ReaWebWaveform>` | 读取各声道 min/max 波形包络 |
-| `reaper.audio.getTrackMeter(track)` | `Promise<ReaWebTrackMeter>` | 读取各声道瞬时峰值及 dBFS |
+| `reaper.audio.getSelectedTrackRef()` | `Promise<ReaWebTrackRef \| null>` | 获取当前工程第一条选中轨道的 GUID 和工程 epoch，未选中时返回 null |
+| `reaper.audio.getTrackMix(track)` | `Promise<{ name, volume }>` | 通过工程轨道引用读取名称和线性音量 |
+| `reaper.audio.applyTrackGain(track, volume, undoLabel)` | `Promise<{ name, volume }>` | 通过当前工程的轨道引用设置线性音量，记录一步撤销并回读结果 |
+| `reaper.audio.controlTransport(action)` | `Promise<null>` | 操作当前工程的走带，仅接受 `play`、`pause`、`stop` |
+| `reaper.audio.getTrackMeter(track)` | `Promise<ReaWebTrackMeter>` | 接受上述工程轨道引用，读取各声道瞬时峰值及 dBFS |
+| `reaper.audio.getFxRef(target)` | `Promise<ReaWebFxRef>` | 按轨道、FX 和可选 Take GUID 解析当前工程内的 FX |
+| `reaper.audio.setFxParameterLatest(ref, index, normalized)` | `Promise<{ applied, superseded }>` | 合并同一 FX 参数的待写入值，支持 0–1 标准化值和托管撤销 |
 | `reaper.audio.setTrackValueLatest(track, key, value)` | `Promise<{ applied, superseded }>` | 合并连续音量、声像、静音、Solo 写入；不会自动创建 Undo |
 
 ## reaper.clipboard
@@ -175,7 +189,7 @@ REAPER 工程、对象、播放及窗口状态通知。Host state notifications;
 | API | 返回 / Result | 用途 |
 | --- | --- | --- |
 | `reaper.system.openExternal(url)` | `Promise<boolean>` | 由系统默认程序打开 http/https/mailto |
-| `reaper.system.getCapabilities()` | `Promise<ReaWebCapabilities>` | 查询版本、Mirror 可用性、命名空间和限制 |
+| `reaper.system.getCapabilities()` | `Promise<ReaWebCapabilities>` | 查询版本、命名空间和限制 |
 
 | `reaper.system.getPlatform()` | `Promise<ReaWebPlatform>` | windows、macos 或 linux |
 | `reaper.system.getArchitecture()` | `Promise<ReaWebArchitecture>` | 扩展进程架构：x64、arm64、x86、arm、unknown |
@@ -183,11 +197,10 @@ REAPER 工程、对象、播放及窗口状态通知。Host state notifications;
 
 ## reaper.transaction
 
-批处理及托管 Undo 编辑分组。Batching and managed Undo grouping; no database-style atomicity, rollback or isolation guarantee.
+托管 Undo 编辑分组。Managed Undo grouping; no database-style atomicity, rollback or isolation guarantee.
 
 | API | 返回 / Result | 用途 |
 | --- | --- | --- |
-| `reaper.transaction.batch(callsOrBuilder, options?)` | `Promise<unknown[]>` / `Promise<ReaWebBatchResult<T>>` | 数组或同步 Mirror Builder，1–128 项已审核调用，支持引用、解构和 undoLabel |
 | `reaper.transaction.beginUndo(label)` | `Promise<string>` | 开始托管编辑手势，返回本页 token |
 | `reaper.transaction.endUndo(token)` | `Promise<boolean>` | 结束托管编辑手势 |
 | `reaper.transaction.withUndo(label, callback)` | `Promise<T>` | 执行回调并在 finally 结束 Undo，保留回调返回值 |
@@ -200,7 +213,7 @@ Await `reaper.lifecycle.ready` before using REAPER APIs and Runtime services.
 
 ```js
 await reaper.lifecycle.ready;
-const track = await reaper.GetTrack(0, 0); // REAPER Mirror
+const track = await reaper.audio.getSelectedTrackRef();
 if (track) {
   await reaper.transaction.withUndo("Set volume", async () => {
     await reaper.audio.setTrackValueLatest(track, "D_VOL", 0.5);
@@ -243,7 +256,7 @@ Since v0.3.9.2, `window.setFrameless`, `window.setCornerRadius` and `fs.moveFile
 
 | Method | Returns | Purpose |
 | --- | --- | --- |
-| `reaper.realtime.subscribe(source, options?)` | `Promise<ReaWebRealtimeSubscription>` | Subscribe to a high-rate source; currently transport on Windows, macOS and Linux |
+| `reaper.realtime.subscribe(source, options?)` | `Promise<ReaWebRealtimeSubscription>` | Subscribe to transport, controls on 1–16 tracks, or 1–32 normalized parameters of one FX instance |
 | `reaper.realtime.getCapabilities()` | `Promise<ReaWebRealtimeCapabilities>` | Query supported sources and rates; no sampling starts |
 | `reaper.realtime.getDiagnostics()` | `Promise<ReaWebRealtimeDiagnostics>` | This window's subscriptions and shared sampling counters |
 

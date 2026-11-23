@@ -157,7 +157,7 @@ class MacDevTools {
 public:
   MacDevTools(WKWebView* view, std::function<void()> focus_page)
     : view_(view), focus_page_(std::move(focus_page)) {
-    view_.inspectable = YES;
+    if (@available(macOS 13.3, *)) view_.inspectable = YES;
     auto preferences = (id<ReaWebDeveloperPreferencesSPI>)view_.configuration.preferences;
     if ([preferences respondsToSelector:@selector(_setDeveloperExtrasEnabled:)] &&
         [view_ respondsToSelector:@selector(_inspector)]) {
@@ -209,6 +209,11 @@ public:
     menu_target_->perform = {}; menu_target_->receive = {};
     forget_frontend();
     if (supported_) [inspector_ close];
+  }
+  bool has_keyboard_focus() const {
+    if (!requested_ || !frontend_ || !frontend_.window.keyWindow) return false;
+    auto responder = frontend_.window.firstResponder;
+    return [responder isKindOfClass:[NSView class]] && [(NSView*)responder isDescendantOf:frontend_];
   }
   bool visible() const { return requested_ && native_visible(); }
   void open() {

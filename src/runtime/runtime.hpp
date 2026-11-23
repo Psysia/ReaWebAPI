@@ -11,6 +11,7 @@
 #include "runtime/native_tasks.hpp"
 #include "runtime/native_producers.hpp"
 #include "runtime/realtime.hpp"
+#include "runtime/track_controls.hpp"
 #include "runtime/external_transport.hpp"
 #include "runtime/external_settings.hpp"
 #include "runtime/diagnostics.hpp"
@@ -79,7 +80,7 @@ private:
     uint64_t id = 0, sequence = 0;
     std::string identity;
     std::shared_ptr<ExternalConnection> connection;
-    std::unique_ptr<ReaperApiCore> core;
+    std::map<std::string, std::string> project_ids;
     std::map<std::string, Subscription> subscriptions;
     std::map<std::string, Json> events;
     std::map<std::string, std::string> consumers;
@@ -205,6 +206,7 @@ private:
   NativeProducers producers_;
   VideoManager video_;
   RealtimeManager realtime_;
+  TrackControls fx_writer_;
   NativeMonitorManager monitors_;
   DockApi dock_;
   fs::path resource_;

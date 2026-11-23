@@ -155,8 +155,9 @@ int Runtime::open_impl(const std::string& path, const fs::path& base, const std:
     [this, entry, launcher = app->launcher_source](const std::string& next) { return open_impl(next, entry.parent_path(), "", launcher); },
     [this, id] { close(id); }, [this, id] { devtools(id); },
     [this, id](bool docked) { return set_docked(id, docked); }, [this, id] { return is_docked(id); },
-    [this, id](const std::string& method, const Json& args) { return host_call(id, method, args); }
-  }, std::to_string(id));
+    [this, id](const std::string& method, const Json& args) { return host_call(id, method, args); },
+    [this] { return project_epoch_; }
+  });
   std::weak_ptr<Session> weak = session;
   auto window_resources = app->resources ? std::make_shared<WebResources>(app->resources->root(), app_id, app->resources->isolation_required()) : nullptr;
 #ifndef _WIN32
@@ -493,7 +494,9 @@ bool Runtime::routes_shortcuts(void* handle, const std::function<bool(void*, voi
   for (const auto& item : sessions_) {
     const auto& s = *item.second;
     auto root = s.window->native_handle();
-    if (s.shortcut_routing && !s.closing && !s.window->closed() && root && (root == handle || is_child(root, handle))) return true;
+    if (s.closing || s.window->closed()) continue;
+    if (s.window->inspector_key_target(handle)) return true;
+    if (s.shortcut_routing && root && (root == handle || is_child(root, handle))) return true;
   }
   return false;
 }
@@ -501,6 +504,7 @@ bool Runtime::captures_keyboard(void* handle, const std::function<bool(void*, vo
   check_thread();
   for (const auto& item : sessions_) {
     const auto& s = *item.second;
+    if (!daw_only && !s.closing && !s.window->closed() && s.window->inspector_key_target(handle)) return true;
     if (daw_only ? !s.daw_keyboard_enabled() : !(s.capture_keyboard || s.shortcut_routing)) continue;
     auto root = s.window->native_handle();
     if (!s.closing && !s.window->closed() && root &&

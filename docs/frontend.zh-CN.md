@@ -2,7 +2,7 @@
 
 [English](frontend.md) | **简体中文** · [宿主 API](host-api.zh-CN.md)
 
-ReaWebAPI 的 **Web Runtime v1** 定义浏览器能力、资源加载和存储约定。Web 能力约定版本独立于扩展版本。JavaScript 通过 Promise 调用 730 项 REAPER 7.80 标准 API。
+Web Runtime v1 定义浏览器能力、资源加载和存储。 网页通过 `window.reaper` 的运行时命名空间访问宿主。
 
 ## WebView 色彩配置
 
@@ -55,11 +55,11 @@ import { render } from './ui.js';
 const config = await (await fetch('./data/config.json')).json();
 localStorage.setItem('theme', 'dark');
 await reaper.lifecycle.ready;
-const track = await reaper.GetTrack(0, 0);
+const track = await reaper.audio.getSelectedTrackRef();
 render(config, track);
 ```
 
-[无需构建的检查 App](../examples/runtime-features/web-runtime/README.zh-CN.md) 演示模块、本地 fetch、存储、Canvas、文件对象、DOM 拖放和 Worker。在 REAPER 中运行其 `reawebapi-web-runtime.lua`。桥接自动注入顶层页面，无需导入 `reaper.js`。镜像调用继续使用 `await`。
+[无需构建的检查 App](../examples/runtime-features/web-runtime/README.zh-CN.md) 演示模块、本地 fetch、存储、Canvas、文件对象、DOM 拖放和 Worker。在 REAPER 中运行其 `reawebapi-web-runtime.lua`。桥接自动注入顶层页面，无需导入 `reaper.js`。
 
 ## v1 保证范围与可选能力
 
@@ -144,7 +144,9 @@ Lua source 与 `instanceKey` 保留路径解析和窗口复用职责，不再生
       WindowState/
 ```
 
-Windows 共享一个 WebView2 Environment。Linux 共享一个 WebKitGTK context 与辅助进程。macOS 在 `WebViewData/` 保留共享 WKWebsiteDataStore UUID，实际数据库由 WebKit 管理。`origin.json` schema 2 记录 App ID、根目录与虚拟 origin，不包含端口。新建或更新的绑定还保存 `entry`，值为规范化的相对 HTML/HTM 路径，解析符号链接和目录联接后仍须位于根目录内。同一身份路径上的旧 schema 1 记录可升级。旧哈希 App 目录和浏览器数据继续保留，HTTP origin 的存储不自动迁移到虚拟 origin。身份元数据损坏时返回 `APP_ORIGIN_INVALID`。
+Windows 共享一个 WebView2 Environment。Linux 共享一个 WebKitGTK context 与辅助进程。macOS 14 及以上在 `WebViewData/` 保留共享 WebKit 数据存储的 UUID。macOS 13 使用 WebKit 为 REAPER 提供的默认持久存储。两种存储均由 WebKit 管理。从 macOS 13 升级到 macOS 14 或更高版本时会切换存储，`localStorage` 等浏览器数据在升级前后分开保存。
+
+`origin.json` schema 2 记录 App ID、根目录与虚拟 origin，不包含端口。新建或更新的绑定还保存 `entry`，值为规范化的相对 HTML/HTM 路径，解析符号链接和目录联接后仍须位于根目录内。同一身份路径上的旧 schema 1 记录可升级。旧哈希 App 目录和浏览器数据继续保留，HTTP origin 的存储不自动迁移到虚拟 origin。身份元数据损坏时返回 `APP_ORIGIN_INVALID`。
 
 备份时应同时保留共享 profile 与相关 `Apps/<appId>/` 目录。浏览器配额与用户清理数据的规则仍然适用。开发页面保留显式 HTTP origin，不创建生产 origin 记录。External Client 的监听器、配置与认证完全独立。
 
@@ -195,7 +197,7 @@ WebView2 取决于已安装运行时，WKWebView 跟随系统更新，WebKitGTK 
 
 本次 WSLg 环境的 WebKitGTK DMA-BUF 渲染路径会使可见页面的动画帧停住；以 `WEBKIT_DISABLE_DMABUF_RENDERER=1` 运行 helper 后，包括原生 requestAnimationFrame 与 WebGL 的完整浏览器检查通过。这是环境开关，扩展不会默认强制设置，也不替换 JS 实现。目标 Linux 桌面应验证默认渲染器；遇到同类问题时，在启动 REAPER 前设置该变量。GTK 视口尺寸已按外部 X11 父窗口的客户区同步分配。
 
-主要实现：`src/web/web_resources.*` 负责资源服务，`src/runtime/runtime.*` 管理 App 来源和共享 profile 生命周期，三个平台文件负责原生 profile 与页面加载，`runtime/reaper.d.ts` 定义能力元数据。测试覆盖原生资源边界、全部 730 项镜像 ABI 映射及实际浏览器行为。
+主要实现：`src/web/web_resources.*` 负责资源服务，`src/runtime/runtime.*` 管理 App 来源和共享 profile 生命周期，三个平台文件负责原生 profile 与页面加载，`runtime/reaper.d.ts` 定义能力元数据。测试覆盖原生资源边界及实际浏览器行为。
 
 原生行为参考：[WebView2 本地内容](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/working-with-local-content)、[WebKitGTK 持久化 cookie](https://webkitgtk.org/reference/webkit2gtk/2.42.5/method.CookieManager.set_persistent_storage.html)。Linux 已明确开启原生 cookie 持久化。
 

@@ -51,8 +51,13 @@ add_test(NAME video COMMAND video_tests)
 add_executable(video_surface_tests video_surface_tests.cpp)
 target_link_libraries(video_surface_tests PRIVATE reaweb_runtime)
 add_test(NAME video_surface COMMAND video_surface_tests)
+add_library(video_reference_fingerprint STATIC
+  video_reference/fingerprint.cpp
+  video_reference/fingerprint_elf.cpp
+  video_reference/fingerprint_macho.cpp)
+target_link_libraries(video_reference_fingerprint PUBLIC reaweb_runtime)
 add_executable(video_fingerprint_tests video_fingerprint_tests.cpp video_fingerprint_elf.cpp video_fingerprint_macho.cpp)
-target_link_libraries(video_fingerprint_tests PRIVATE reaweb_runtime)
+target_link_libraries(video_fingerprint_tests PRIVATE video_reference_fingerprint)
 add_test(NAME video_fingerprint COMMAND video_fingerprint_tests)
 if(REAWEB_BUILD_EXTENSION)
   if((WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8 AND NOT CMAKE_SYSTEM_PROCESSOR MATCHES "ARM64|aarch64" AND
@@ -69,7 +74,7 @@ if(REAWEB_BUILD_EXTENSION)
     endif()
     set_target_properties(video_internal_probe PROPERTIES PREFIX "" OUTPUT_NAME "reaper_video_internals_probe")
     add_library(video_cadence_probe MODULE EXCLUDE_FROM_ALL video_cadence_probe.cpp)
-    target_link_libraries(video_cadence_probe PRIVATE reaweb_runtime)
+    target_link_libraries(video_cadence_probe PRIVATE video_reference_fingerprint)
     target_include_directories(video_cadence_probe PRIVATE "${PROJECT_BINARY_DIR}/sdk-layout/sdk"
       "${reaper_sdk_SOURCE_DIR}/sdk" "${wdl_SOURCE_DIR}/WDL")
     target_compile_definitions(video_cadence_probe PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
@@ -240,22 +245,6 @@ if(WIN32)
   target_compile_options(window_icons PRIVATE /utf-8)
 endif()
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
-add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/native_abi_generated.cpp"
-  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/generate_native_abi.py" "${CMAKE_CURRENT_BINARY_DIR}/native_abi_generated.cpp"
-  DEPENDS generate_native_abi.py "${PROJECT_SOURCE_DIR}/api/reaper_api.json" "${PROJECT_SOURCE_DIR}/api/bindings.json"
-          "${PROJECT_SOURCE_DIR}/tools/native_bindings.py"
-  VERBATIM)
-add_executable(native_abi "${CMAKE_CURRENT_BINARY_DIR}/native_abi_generated.cpp")
-target_link_libraries(native_abi PRIVATE reaweb_core)
-target_include_directories(native_abi SYSTEM PRIVATE "${PROJECT_BINARY_DIR}/sdk-layout/sdk")
-target_compile_definitions(native_abi PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-if(NOT WIN32)
-  target_compile_definitions(native_abi PRIVATE SWELL_PROVIDED_BY_APP)
-  # The generated test driver is intentionally huge. Test the optimized library,
-  # without spending minutes optimizing the linear list of test assertions.
-  target_compile_options(native_abi PRIVATE -O0)
-endif()
-add_test(NAME native_abi COMMAND native_abi)
 if(MSVC)
   target_compile_options(core_tests PRIVATE /utf-8)
   target_compile_options(runtime_tests PRIVATE /utf-8)
@@ -409,6 +398,10 @@ if(APPLE AND REAWEB_BUILD_EXTENSION)
   target_link_libraries(macos_devtools PRIVATE reaweb_core "-framework Cocoa" "-framework WebKit")
 endif()
 if(UNIX AND NOT APPLE AND REAWEB_BUILD_EXTENSION)
+  add_executable(linux_display_modes linux_display_modes.cpp)
+  target_include_directories(linux_display_modes PRIVATE "${PROJECT_SOURCE_DIR}/src")
+  target_link_libraries(linux_display_modes PRIVATE X11::Xrandr)
+  add_test(NAME linux_display_modes COMMAND linux_display_modes)
   add_executable(linux_geometry linux_geometry.cpp)
   target_include_directories(linux_geometry PRIVATE "${PROJECT_SOURCE_DIR}/src" ${X11_INCLUDE_DIR})
   target_link_libraries(linux_geometry PRIVATE ${CMAKE_DL_LIBS})

@@ -138,17 +138,50 @@ test('Runtime Studio keeps the latest selection when name responses arrive out o
   const context = vm.createContext({
     document: { getElementById: () => label },
     reaper: {
-      GetSelectedTrack: async () => ({ id: ++id }),
-      GetTrackName: () => new Promise(resolve => names.push(resolve))
+      audio: {
+        getSelectedTrackRef: async () => ({ guid: String(++id), projectEpoch: 1 }),
+        getTrackMix: () => new Promise(resolve => names.push(resolve))
+      }
     }
   });
   const source = fs.readFileSync(path.join(__dirname, '../examples/runtime-features/runtime-demo/app.js'), 'utf8');
   vm.runInContext(source.slice(0, source.indexOf("action('open'")), context);
   const first = context.selectedTrack(); await flush();
   const second = context.selectedTrack(); await flush();
-  names[1]([true, 'Track B']); await second;
-  names[0]([true, 'Track A']); await first;
+  names[1]({ name: 'Track B' }); await second;
+  names[0]({ name: 'Track A' }); await first;
   assert.equal(label.textContent, 'Track B');
+});
+
+test('external demo connects and both project buttons work with mirror RPC disabled', async () => {
+  const elements = new Map(), requests = [];
+  function element(id) {
+    if (!elements.has(id)) elements.set(id, { textContent: '', value: '' });
+    return elements.get(id);
+  }
+  class Socket {
+    static OPEN = 1;
+    constructor() { this.readyState = Socket.OPEN; queueMicrotask(() => this.onopen()); }
+    send(data) {
+      const { id, method, params } = JSON.parse(data);
+      requests.push([method, params]);
+      const result = method === 'auth.authenticate' ? { authenticated: true } :
+        method === 'system.getInfo' ? { version: 'test' } :
+        method === 'service.invoke' && params.service === 'runtime' && params.method === 'getProjectSummary' ?
+          { name: 'Test project', trackCount: 3, playState: 1 } : undefined;
+      const reply = result ? { id, result } : { id, error: { code: 'UNKNOWN_METHOD', message: method } };
+      queueMicrotask(() => this.onmessage({ data: JSON.stringify(reply) }));
+    }
+  }
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../examples/integrations/external-client/app.js'), 'utf8'),
+    { document: { getElementById: element }, WebSocket: Socket, setTimeout, clearTimeout });
+  element('port').value = '9123'; element('token').value = 'fixture';
+  await element('connect').onclick();
+  assert.equal(element('status').textContent, 'Connected');
+  await element('count').onclick(); await element('project').onclick();
+  assert.deepEqual(requests.map(([method]) => method), ['auth.authenticate', 'system.getInfo', 'service.invoke', 'service.invoke']);
+  assert.match(element('log').textContent, /Track count\n3/);
+  assert.match(element('log').textContent, /"playState": 1/);
 });
 
 test('manual project read waits for its response and reports failures without false success', async () => {
@@ -327,4 +360,43 @@ test('a frame never overwrites an active slider drag, and unreadable content is 
   // Malformed Lua content is reported instead of silently swallowed.
   await f.pushFrame({ sequence: 2, lua: 'not json' });
   assert.match(f.element('error').textContent, /ERROR|Unexpected/);
+});
+
+test('native transport still starts with older demo markup', async () => {
+  const directory = path.join(__dirname, '../examples/integrations/native-transport');
+  const html = fs.readFileSync(path.join(directory, 'index.html'), 'utf8');
+  const [, script] = html.match(/<script>([\s\S]*?)<\/script>/);
+  const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(([, id]) => id);
+  const writeControls = ['apply-fx', 'fx-value'];
+  const addedControls = [...writeControls, 'display-max', 'watch-track', 'unwatch-track', 'track-state',
+    'watch-fx', 'unwatch-fx', 'fx-state', 'fx-chain', 'fx-track', 'fx-take', 'fx-guid', 'fx-index'];
+
+  for (const absent of [[], writeControls, addedControls]) {
+    const elements = new Map(ids.filter(id => !absent.includes(id)).map(id => [id, { value: '', disabled: true }]));
+    const getElementById = id => elements.get(id) ?? null;
+    getElementById('chart').getContext = () => ({ clearRect() {}, fillText() {}, beginPath() {}, stroke() {} });
+    getElementById('mode').setAttribute = () => {};
+    const subscriptions = [];
+    const reaper = {
+      lifecycle: { ready: Promise.resolve() }, window: { getMaxRefreshRate: async () => 120 },
+      audio: { controlTransport() {} },
+      realtime: {
+        getCapabilities: async () => ({ sources: Object.fromEntries(['transport', 'track-controls', 'fx-parameters']
+          .map(source => [source, { available: true }])) }),
+        subscribe: async (source, options) => {
+          subscriptions.push([source, options.updateRate]);
+          return { close: async () => {} };
+        }
+      }
+    };
+    const window = { reaper, addEventListener() {} };
+    const document = { getElementById, documentElement: {}, querySelectorAll: () => [] };
+    vm.runInNewContext(script, { document, window, reaper, performance: { now: () => 0 }, setInterval() {} });
+    await window.demoReady;
+
+    assert.deepEqual(subscriptions, [['transport', 60]]);
+    assert.equal(getElementById('play').disabled, false);
+    if (!absent.includes('watch-track')) assert.equal(getElementById('watch-track').disabled, false);
+    if (!absent.includes('watch-fx')) assert.equal(getElementById('watch-fx').disabled, false);
+  }
 });
