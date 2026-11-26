@@ -2,9 +2,10 @@ import hashlib
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 
-from sync_upstream import checked_asset, inspect_bundle, source_contracts, valid_tag, web_contract
+from sync_upstream import checked_asset, inspect_bundle, main, source_contracts, sync_source, valid_tag, web_contract
 
 
 class MirrorIntegrity(unittest.TestCase):
@@ -97,6 +98,36 @@ class MirrorIntegrity(unittest.TestCase):
             self.assertEqual(source_contracts(source, commit), {"protocol": 1, "runtime": 2, "web": 1, "max_message_bytes": 1048576})
             with self.assertRaises(KeyError):
                 source_contracts(source, "b" * 40)
+
+
+class SyncPolicy(unittest.TestCase):
+    def test_source_sync_uses_only_fast_forward_main(self):
+        with patch("sync_upstream.run", side_effect=["", "", "old", "new", "", ""]) as command:
+            sync_source(Path("."))
+        self.assertEqual(command.call_args_list[-2].args[:3], ("git", "merge-base", "--is-ancestor"))
+        self.assertEqual(command.call_args_list[-1].args,
+                         ("git", "push", "origin", "refs/remotes/upstream/main:refs/heads/main"))
+
+    def test_workflow_permission_defers_but_other_failures_do_not(self):
+        permission = RuntimeError("git push failed: refusing to allow a GitHub App to create or update workflow "
+                                  ".github/workflows/build.yml without `workflows` permission")
+        for problem, defer, allowed in (
+            (permission, True, True), (permission, False, False),
+            (RuntimeError("git push failed: permission to repository denied"), True, False),
+            (RuntimeError("git merge-base failed: branches diverged"), True, False),
+        ):
+            args = ["sync"] + (["--defer-workflow-permission"] if defer else [])
+            with self.subTest(problem=problem, defer=defer), patch("sys.argv", args), \
+                    patch("sync_upstream.verify_origin"), patch("sync_upstream.sync_source", side_effect=problem), \
+                    patch("sync_upstream.mirror_release") as mirror, patch("sync_upstream.report") as summary:
+                if allowed:
+                    main()
+                    summary.assert_called_once()
+                else:
+                    with self.assertRaises(RuntimeError):
+                        main()
+                    summary.assert_not_called()
+                mirror.assert_not_called()
 
 
 if __name__ == "__main__":

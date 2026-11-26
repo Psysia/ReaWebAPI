@@ -173,20 +173,34 @@ def source_contracts(path: Path, commit: str) -> dict:
     }
 
 
-def sync_source(worktree: Path) -> None:
+def verify_origin(worktree: Path) -> None:
     origin = run("git", "remote", "get-url", "origin", cwd=worktree)
     if origin.removesuffix(".git").removesuffix("/") not in (f"https://github.com/{FORK}", f"git@github.com:{FORK}"):
         raise ValueError("Refusing to write an unexpected Git origin")
-    if run("git", "branch", "--show-current", cwd=worktree) != "psyreasfx":
-        raise ValueError("Run the mirror from the psyreasfx automation branch")
-    if run("git", "status", "--porcelain", "--untracked-files=no", cwd=worktree):
-        raise ValueError("Commit tracked work before syncing the fork")
-    run("git", "fetch", "--no-tags", "origin", "main:refs/remotes/origin/main", cwd=worktree)
-    run("git", "fetch", "--no-tags", f"https://github.com/{UPSTREAM}.git", "main:refs/remotes/upstream/main", cwd=worktree)
-    run("git", "merge-base", "--is-ancestor", "refs/remotes/origin/main", "refs/remotes/upstream/main", cwd=worktree)
-    run("git", "push", "origin", "refs/remotes/upstream/main:refs/heads/main", cwd=worktree)
-    run("git", "merge", "--no-edit", "refs/remotes/upstream/main", cwd=worktree)
-    run("git", "push", "origin", "HEAD:refs/heads/psyreasfx", cwd=worktree)
+
+
+def sync_source(worktree: Path) -> None:
+    fork_ref, upstream_ref = "refs/remotes/origin/main", "refs/remotes/upstream/main"
+    run("git", "fetch", "--no-tags", "origin", f"main:{fork_ref}", cwd=worktree)
+    run("git", "fetch", "--no-tags", f"https://github.com/{UPSTREAM}.git", f"main:{upstream_ref}", cwd=worktree)
+    if run("git", "rev-parse", fork_ref, cwd=worktree) == run("git", "rev-parse", upstream_ref, cwd=worktree):
+        return
+    run("git", "merge-base", "--is-ancestor", fork_ref, upstream_ref, cwd=worktree)
+    run("git", "push", "origin", f"{upstream_ref}:refs/heads/main", cwd=worktree)
+
+
+def workflow_permission_required(error: RuntimeError) -> bool:
+    message = str(error)
+    return (message.startswith("git push failed: ")
+            and "refusing to allow a GitHub App to create or update workflow" in message
+            and 'without `workflows` permission' in message)
+
+
+def report(message: str) -> None:
+    print(message)
+    if os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+            summary.write(message + "\n")
 
 
 def mirror_release(worktree: Path, tag: str) -> dict:
@@ -259,16 +273,27 @@ def main() -> None:
     parser.add_argument("--worktree", type=Path, default=Path.cwd())
     parser.add_argument("--tag", default="latest")
     parser.add_argument("--skip-source-sync", action="store_true")
+    parser.add_argument("--defer-workflow-permission", action="store_true")
     args = parser.parse_args()
     if os.environ.get("GITHUB_REPOSITORY", FORK) != FORK:
         raise ValueError("This workflow may only publish to the Psysia fork")
-    if not args.skip_source_sync:
-        sync_source(args.worktree.resolve())
-    result = mirror_release(args.worktree.resolve(), args.tag)
+    worktree = args.worktree.resolve()
+    verify_origin(worktree)
+    try:
+        if not args.skip_source_sync:
+            sync_source(worktree)
+        result = mirror_release(worktree, args.tag)
+    except RuntimeError as error:
+        if not args.defer_workflow_permission or not workflow_permission_required(error):
+            raise
+        report("**Waiting for fork synchronization / 等待 fork 同步**\n\n"
+               "GitHub requires workflow write permission for this upstream change. "
+               "The authenticated release preflight can fast-forward the fork and request the mirror.\n\n"
+               "本次上游变更需要工作流写入权限，发布前检查会使用已登录的 GitHub 凭据推进 fork 并请求镜像。")
+        return
     print(json.dumps(result))
     if os.environ.get("GITHUB_STEP_SUMMARY"):
-        with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
-            summary.write(f"Mirrored [{result['tag']}](https://github.com/{FORK}/releases/tag/{result['tag']}) at `{result['commit']}`.\n")
+        report(f"Mirrored [{result['tag']}](https://github.com/{FORK}/releases/tag/{result['tag']}) at {result['commit']}.")
 
 
 if __name__ == "__main__":
